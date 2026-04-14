@@ -1,0 +1,258 @@
+import { useCallback, useState, useRef } from "react";
+import { useFileStore, Tab } from "@/stores/useFileStore";
+import { useLocaleStore } from "@/stores/useLocaleStore";
+import { useUIStore } from "@/stores/useUIStore";
+import { X, FileText, Network, Pin } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { useShallow } from "zustand/react/shallow";
+import { useMacTopChromeEnabled } from "./MacTopChrome";
+
+const MAC_TRAFFIC_LIGHT_SAFE_AREA_WIDTH = 72;
+const MAC_COLLAPSED_RIBBON_WIDTH = 44;
+const MAC_TABBAR_LEFT_SAFE_INSET = MAC_TRAFFIC_LIGHT_SAFE_AREA_WIDTH - MAC_COLLAPSED_RIBBON_WIDTH;
+
+interface TabItemProps {
+  tab: Tab;
+  index: number;
+  isActive: boolean;
+  isDragging: boolean;
+  isDropTarget: boolean;
+  dropPosition: 'left' | 'right' | null;
+  displayName: string;
+  onSelect: () => void;
+  onDoubleClick: () => void;
+  onClose: (e: React.MouseEvent) => void;
+  onContextMenu: (e: React.MouseEvent) => void;
+  onMouseDown: (e: React.MouseEvent, index: number) => void;
+}
+
+function TabItem({
+  tab,
+  index,
+  isActive,
+  isDragging,
+  isDropTarget,
+  dropPosition,
+  displayName,
+  onSelect,
+  onDoubleClick,
+  onClose,
+  onContextMenu,
+  onMouseDown,
+}: TabItemProps) {
+  return (
+    <div
+      data-tab-index={index}
+      data-tauri-drag-region="false"
+      className={cn(
+        "group relative flex items-center gap-1.5 px-3 py-1.5 text-sm cursor-grab border-r border-border/50",
+        "transition-[background-color,color] duration-150 select-none",
+        isActive
+          ? "bg-background/70 text-foreground shadow-[inset_0_-1px_0_hsl(var(--primary)/0.6)]"
+          : "bg-transparent text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+        isDragging && "opacity-50 cursor-grabbing",
+        isDropTarget && dropPosition === 'left' && "border-l-2 border-l-primary",
+        isDropTarget && dropPosition === 'right' && "border-r-2 border-r-primary"
+      )}
+      onClick={onSelect}
+      onDoubleClick={onDoubleClick}
+      onContextMenu={onContextMenu}
+      onMouseDown={(e) => onMouseDown(e, index)}
+    >
+      {tab.type === "graph" || tab.type === "isolated-graph" ? (
+        <Network size={12} className="shrink-0 text-primary" />
+      ) : (
+        <FileText size={12} className="shrink-0 text-primary/50" />
+      )}
+      <span className={cn("truncate max-w-[120px]", tab.isPreview && "italic")}>{displayName}</span>
+      {tab.isPinned && (
+        <Pin size={10} className="shrink-0 text-primary rotate-45" />
+      )}
+      {tab.isDirty && (
+        <span className="w-1.5 h-1.5 rounded-full bg-orange-400 shrink-0" />
+      )}
+      {!tab.isPinned && (
+        <button
+          data-tauri-drag-region="false"
+          onClick={onClose}
+          className={cn(
+            "shrink-0 p-0.5 rounded-ui-sm hover:bg-accent/60",
+            "opacity-0 group-hover:opacity-100 transition-opacity",
+            isActive && "opacity-60"
+          )}
+        >
+          <X size={12} />
+        </button>
+      )}
+      {/* Active indicator */}
+      {isActive && (
+        <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-primary/80" />
+      )}
+    </div>
+  );
+}
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  tabIndex: number;
+}
+
+export function TabBar() {
+  const { t } = useLocaleStore();
+  const { tabs, activeTabIndex, switchTab, closeTab, closeOtherTabs, closeAllTabs, togglePinTab, promotePreviewTab } =
+    useFileStore(
+      useShallow((state) => ({
+        tabs: state.tabs,
+        activeTabIndex: state.activeTabIndex,
+        switchTab: state.switchTab,
+        closeTab: state.closeTab,
+        closeOtherTabs: state.closeOtherTabs,
+        closeAllTabs: state.closeAllTabs,
+        togglePinTab: state.togglePinTab,
+        promotePreviewTab: state.promotePreviewTab,
+      })),
+    );
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [dropTargetIndex] = useState<number | null>(null);
+  const [dropPosition] = useState<'left' | 'right' | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragStartPos = useRef<{ x: number; y: number } | null>(null);
+  const isDragging = useRef(false);
+  const showMacTopActions = useMacTopChromeEnabled();
+  const leftSidebarOpen = useUIStore((state) => state.leftSidebarOpen);
+  const showMacTrafficLightInset = showMacTopActions && !leftSidebarOpen;
+
+  const handleContextMenu = useCallback((e: React.MouseEvent, index: number) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY, tabIndex: index });
+  }, []);
+
+  const handleClickOutside = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  const handleClose = useCallback(
+    (e: React.MouseEvent, index: number) => {
+      e.stopPropagation();
+      const tab = tabs[index];
+      void closeTab(index).catch((error) => {
+        console.error("[TabBar.handleClose] Close tab failed:", error, {
+          index,
+          tabId: tab?.id,
+        });
+      });
+    },
+    [closeTab, tabs]
+  );
+
+  // 自定义鼠标拖拽（绕过 Tauri WebView 的 HTML5 拖拽限制）
+  const handleTabMouseDown = useCallback((e: React.MouseEvent, index: number) => {
+    if (e.button !== 0) return; // 只处理左键
+    dragStartPos.current = { x: e.clientX, y: e.clientY };
+    setDraggedIndex(index);
+    isDragging.current = false;
+  }, []);
+
+  // 监听全局鼠标移动和松开
+
+  // 即使没有标签页也显示空的标签栏（保持 UI 一致性）
+  return (
+    <>
+      <div
+        className="flex h-11 shrink-0 items-stretch border-b border-border/60 bg-background/55 backdrop-blur-md shadow-[0_1px_0_hsl(var(--border)/0.5)]"
+        data-tauri-drag-region={showMacTopActions ? true : undefined}
+      >
+        <div
+          ref={containerRef}
+          className="flex min-w-0 flex-1 items-stretch overflow-x-auto scrollbar-hide"
+          data-tauri-drag-region={showMacTopActions ? true : undefined}
+          data-testid="mac-tabbar-tabstrip"
+        >
+          {showMacTrafficLightInset ? (
+            <div
+              className="h-full shrink-0"
+              style={{ width: `${MAC_TABBAR_LEFT_SAFE_INSET}px` }}
+              data-testid="mac-tabbar-traffic-light-spacer"
+            />
+          ) : null}
+          {tabs.map((tab, index) => (
+            <TabItem
+              key={tab.id}
+              tab={tab}
+              index={index}
+              isActive={index === activeTabIndex}
+              isDragging={index === draggedIndex && isDragging.current}
+              isDropTarget={index === dropTargetIndex}
+              dropPosition={index === dropTargetIndex ? dropPosition : null}
+              displayName={
+                tab.type === "ai-chat"
+                  ? t.common.aiChatTab
+                  : tab.type === "graph"
+                    ? t.graph.title
+                    : tab.name
+              }
+              onSelect={() => switchTab(index)}
+              onDoubleClick={() => tab.isPreview && promotePreviewTab(tab.id)}
+              onClose={(e) => handleClose(e, index)}
+              onContextMenu={(e) => handleContextMenu(e, index)}
+              onMouseDown={handleTabMouseDown}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={handleClickOutside} aria-hidden="true" />
+          <div
+            className="fixed z-50 bg-background/75 backdrop-blur-md border border-border/60 rounded-ui-md shadow-ui-float py-1 min-w-[160px]"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <button
+              onClick={() => {
+                togglePinTab(contextMenu.tabIndex);
+                setContextMenu(null);
+              }}
+              className="w-full px-3 py-1.5 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
+            >
+              <Pin size={12} className={tabs[contextMenu.tabIndex]?.isPinned ? "" : "rotate-45"} />
+              {tabs[contextMenu.tabIndex]?.isPinned ? t.tabBar.unpin : t.tabBar.pin}
+            </button>
+            <div className="h-px bg-border my-1" />
+            <button
+              onClick={() => {
+                closeTab(contextMenu.tabIndex);
+                setContextMenu(null);
+              }}
+              className="w-full px-3 py-1.5 text-sm text-left hover:bg-accent/60 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={tabs[contextMenu.tabIndex]?.isPinned}
+            >
+              {t.tabBar.close}
+            </button>
+            <button
+              onClick={() => {
+                closeOtherTabs(contextMenu.tabIndex);
+                setContextMenu(null);
+              }}
+              className="w-full px-3 py-1.5 text-sm text-left hover:bg-accent/60 transition-colors"
+            >
+              {t.tabBar.closeOthers}
+            </button>
+            <button
+              onClick={() => {
+                closeAllTabs();
+                setContextMenu(null);
+              }}
+              className="w-full px-3 py-1.5 text-sm text-left hover:bg-accent/60 transition-colors"
+            >
+              {t.tabBar.closeAll}
+            </button>
+          </div>
+        </>
+      )}
+    </>
+  );
+}

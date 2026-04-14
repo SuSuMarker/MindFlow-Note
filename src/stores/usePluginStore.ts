@@ -1,0 +1,237 @@
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+import {
+  listPlugins,
+  scaffoldWorkspaceExamplePlugin,
+  scaffoldWorkspaceThemePlugin,
+  scaffoldWorkspaceUiOverhaulPlugin,
+  getWorkspacePluginDir,
+} from "@/lib/tauri";
+import type { PluginInfo, PluginRuntimeStatus } from "@/types/plugins";
+import { pluginRuntime } from "@/services/plugins/runtime";
+import { pluginStyleRuntime } from "@/services/plugins/styleRuntime";
+
+interface PluginStoreState {
+  plugins: PluginInfo[];
+  enabledById: Record<string, boolean>;
+  ribbonItemEnabledByKey: Record<string, boolean>;
+  runtimeStatus: Record<string, PluginRuntimeStatus>;
+  loading: boolean;
+  error: string | null;
+  workspacePluginDir: string | null;
+  appearanceSafeMode: boolean;
+  loadPlugins: (workspacePath?: string) => Promise<void>;
+  reloadPlugins: (workspacePath?: string) => Promise<void>;
+  setPluginEnabled: (pluginId: string, enabled: boolean, workspacePath?: string) => Promise<void>;
+  setRibbonItemEnabled: (pluginId: string, itemId: string, enabled: boolean) => void;
+  isRibbonItemEnabled: (pluginId: string, itemId: string, defaultEnabled?: boolean) => boolean;
+  ensureWorkspacePluginDir: () => Promise<string>;
+  scaffoldExamplePlugin: () => Promise<string>;
+  scaffoldThemePlugin: () => Promise<string>;
+  scaffoldUiOverhaulPlugin: () => Promise<string>;
+  setAppearanceSafeMode: (enabled: boolean, workspacePath?: string) => Promise<void>;
+  isolatePluginStyles: () => void;
+}
+
+const APPEARANCE_PERMISSIONS = new Set([
+  "ui:*",
+  "ui:decorate",
+  "ui:theme",
+  "editor:decorate",
+  "workspace:panel",
+  "workspace:tab",
+]);
+
+const isAppearancePlugin = (permissions: string[]) =>
+  permissions.some((perm) => APPEARANCE_PERMISSIONS.has(perm));
+
+const isPurelyAppearancePlugin = (permissions: string[]) =>
+  permissions.length > 0 && permissions.every((perm) => APPEARANCE_PERMISSIONS.has(perm));
+
+export type PluginCategory = 'functional' | 'appearance' | 'system';
+
+export const categorizePlugin = (plugin: PluginInfo): PluginCategory => {
+  // 系统插件：builtin 来源
+  if (plugin.source === 'builtin') return 'system';
+  
+  const perms = plugin.permissions || [];
+  
+  // 外观插件：只有外观相关权限
+  const hasAppearancePerm = perms.some(p => APPEARANCE_PERMISSIONS.has(p));
+  const hasFunctionalPerm = perms.some(p => !APPEARANCE_PERMISSIONS.has(p));
+  
+  if (hasAppearancePerm && !hasFunctionalPerm) return 'appearance';
+  return 'functional';
+};
+
+const DEFAULT_DISABLED_SAMPLE_PLUGIN_IDS = new Set<string>([
+  "hello-mindflow",
+  "ui-overhaul-lab",
+  "theme-oceanic",
+]);
+
+const toEffectiveEnabledById = (
+  plugins: PluginInfo[],
+  enabledById: Record<string, boolean>,
+  appearanceSafeMode: boolean,
+) => {
+  const next = { ...enabledById };
+
+  // Sample plugins should stay opt-in unless user explicitly toggles them.
+  for (const plugin of plugins) {
+    if (
+      DEFAULT_DISABLED_SAMPLE_PLUGIN_IDS.has(plugin.id) &&
+      !Object.prototype.hasOwnProperty.call(next, plugin.id)
+    ) {
+      next[plugin.id] = false;
+    }
+  }
+
+  // Guardrail: non-builtin appearance plugins can override core theme tokens/colors.
+  // They must be explicitly enabled by user action, even if manifest sets enabled_by_default=true.
+  // This prevents "cold start unexpectedly changes dark theme tint" regressions.
+  for (const plugin of plugins) {
+    if (
+      plugin.source !== "builtin" &&
+      isAppearancePlugin(plugin.permissions || []) &&
+      !Object.prototype.hasOwnProperty.call(next, plugin.id)
+    ) {
+      next[plugin.id] = false;
+    }
+  }
+
+  if (!appearanceSafeMode) {
+    return next;
+  }
+  for (const plugin of plugins) {
+    if (isPurelyAppearancePlugin(plugin.permissions || [])) {
+      next[plugin.id] = false;
+    }
+  }
+  return next;
+};
+
+export const usePluginStore = create<PluginStoreState>()(
+  persist(
+    (set, get) => ({
+      plugins: [],
+      enabledById: {},
+      ribbonItemEnabledByKey: {},
+      runtimeStatus: {},
+      loading: false,
+      error: null,
+      workspacePluginDir: null,
+      appearanceSafeMode: false,
+
+      loadPlugins: async (workspacePath?: string) => {
+        set({ loading: true, error: null });
+        try {
+          const discovered = await listPlugins(workspacePath);
+          const plugins = Array.isArray(discovered) ? discovered : [];
+          const effectiveEnabledById = toEffectiveEnabledById(
+            plugins,
+            get().enabledById,
+            get().appearanceSafeMode,
+          );
+          const runtimeStatus = await pluginRuntime.sync({
+            plugins,
+            workspacePath,
+            enabledById: effectiveEnabledById,
+          });
+          set({ plugins, runtimeStatus, loading: false });
+        } catch (err) {
+          set({
+            loading: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+
+      reloadPlugins: async (workspacePath?: string) => {
+        pluginRuntime.unloadAll();
+        await get().loadPlugins(workspacePath);
+      },
+
+      setPluginEnabled: async (pluginId: string, enabled: boolean, workspacePath?: string) => {
+        set((state) => ({
+          enabledById: {
+            ...state.enabledById,
+            [pluginId]: enabled,
+          },
+        }));
+
+        const plugins = get().plugins;
+        const effectiveEnabledById = toEffectiveEnabledById(
+          plugins,
+          get().enabledById,
+          get().appearanceSafeMode,
+        );
+        const runtimeStatus = await pluginRuntime.sync({
+          plugins,
+          workspacePath,
+          enabledById: effectiveEnabledById,
+        });
+        set({ runtimeStatus });
+      },
+
+      setRibbonItemEnabled: (pluginId: string, itemId: string, enabled: boolean) => {
+        const key = `${pluginId}:${itemId}`;
+        set((state) => ({
+          ribbonItemEnabledByKey: {
+            ...state.ribbonItemEnabledByKey,
+            [key]: enabled,
+          },
+        }));
+      },
+
+      isRibbonItemEnabled: (pluginId: string, itemId: string, defaultEnabled: boolean = true) => {
+        const key = `${pluginId}:${itemId}`;
+        const state = get();
+        if (Object.prototype.hasOwnProperty.call(state.ribbonItemEnabledByKey, key)) {
+          return Boolean(state.ribbonItemEnabledByKey[key]);
+        }
+        return defaultEnabled;
+      },
+
+      ensureWorkspacePluginDir: async () => {
+        const dir = await getWorkspacePluginDir();
+        set({ workspacePluginDir: dir });
+        return dir;
+      },
+
+      scaffoldExamplePlugin: async () => {
+        const dir = await scaffoldWorkspaceExamplePlugin();
+        await get().loadPlugins();
+        return dir;
+      },
+      scaffoldThemePlugin: async () => {
+        const dir = await scaffoldWorkspaceThemePlugin();
+        await get().loadPlugins();
+        return dir;
+      },
+      scaffoldUiOverhaulPlugin: async () => {
+        const dir = await scaffoldWorkspaceUiOverhaulPlugin();
+        await get().loadPlugins();
+        return dir;
+      },
+      setAppearanceSafeMode: async (enabled: boolean, workspacePath?: string) => {
+        set({ appearanceSafeMode: enabled });
+        if (enabled) {
+          pluginStyleRuntime.clearAll();
+        }
+        await get().loadPlugins(workspacePath);
+      },
+      isolatePluginStyles: () => {
+        pluginStyleRuntime.clearAll();
+      },
+    }),
+    {
+      name: "mindflow-plugins",
+      partialize: (state) => ({
+        enabledById: state.enabledById,
+        ribbonItemEnabledByKey: state.ribbonItemEnabledByKey,
+        appearanceSafeMode: state.appearanceSafeMode,
+      }),
+    }
+  )
+);

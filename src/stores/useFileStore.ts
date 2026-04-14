@@ -1,0 +1,1740 @@
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+import { FileEntry, listDirectory, readFile, saveFile, createFile, createDir } from "@/lib/tauri";
+import { invoke } from '@tauri-apps/api/core';
+import { useFavoriteStore } from "@/stores/useFavoriteStore";
+import { useWorkspaceStore } from "@/stores/useWorkspaceStore";
+import { useOpenClawWorkspaceStore } from "@/stores/useOpenClawWorkspaceStore";
+import { getCurrentTranslations } from "@/stores/useLocaleStore";
+import { parseFrontmatter } from "@/services/markdown/frontmatter";
+import { reportOperationError } from "@/lib/reportError";
+
+// 历史记录条目
+interface HistoryEntry {
+  content: string;
+  type: "user" | "ai";
+  timestamp: number;
+  description?: string;
+}
+
+// 标签页类型
+export type TabType =
+  | "file"
+  | "diagram"
+  | "graph"
+  | "isolated-graph"
+  | "ai-chat";
+
+// 孤立视图节点信息
+export interface IsolatedNodeInfo {
+  id: string;
+  label: string;
+  path: string;
+  isFolder: boolean;
+}
+
+// 标签页
+export interface Tab {
+  id: string; // 唯一标识
+  type: TabType;
+  path: string; // 文件路径，特殊标签页为空
+  name: string;
+  content: string;
+  isDirty: boolean;
+  isPinned?: boolean; // 是否固定
+  isPreview?: boolean;
+  undoStack: HistoryEntry[];
+  redoStack: HistoryEntry[];
+  isolatedNode?: IsolatedNodeInfo; // 孤立视图的目标节点
+}
+
+type MobileWorkspaceSyncStatus = {
+  status: "idle" | "syncing" | "confirmed" | "error";
+  path: string | null;
+  lastInvokeAt: number | null;
+  lastConfirmedAt: number | null;
+  error: string | null;
+  source: string | null;
+};
+
+async function refreshDatabaseRowsForPath(path: string): Promise<void> {
+  if (!path.toLowerCase().endsWith(".md")) return;
+  try {
+    const content = await readFile(path);
+    const { frontmatter, hasFrontmatter } = parseFrontmatter(content);
+    const dbId = hasFrontmatter ? frontmatter.db : null;
+    if (!dbId) return;
+    const { useDatabaseStore } = await import("./useDatabaseStore");
+    await useDatabaseStore.getState().refreshRows(String(dbId));
+  } catch (error) {
+    reportOperationError({
+      source: "FileStore.refreshDatabaseRowsForPath",
+      action: "Refresh linked database rows",
+      error,
+      level: "warning",
+      context: { path },
+    });
+  }
+}
+
+async function refreshAllLoadedDatabases(): Promise<void> {
+  try {
+    const { useDatabaseStore } = await import("./useDatabaseStore");
+    const dbIds = Object.keys(useDatabaseStore.getState().databases);
+    for (const dbId of dbIds) {
+      await useDatabaseStore.getState().refreshRows(dbId);
+    }
+  } catch (error) {
+    reportOperationError({
+      source: "FileStore.refreshAllLoadedDatabases",
+      action: "Refresh loaded databases",
+      error,
+      level: "warning",
+    });
+  }
+}
+
+interface FileState {
+  // Vault
+  vaultPath: string | null;
+  fileTree: FileEntry[];
+
+  // Tabs
+  tabs: Tab[];
+  activeTabIndex: number;
+
+  // Current file (derived from active tab)
+  currentFile: string | null;
+  currentContent: string;
+  isDirty: boolean;
+
+  // Undo/Redo history
+  undoStack: HistoryEntry[];
+  redoStack: HistoryEntry[];
+  lastSavedContent: string;
+
+  // Navigation history (browser-like back/forward)
+  navigationHistory: string[];
+  navigationIndex: number;
+
+  // Recent files history
+  recentFiles: string[];
+
+  // Loading states
+  isLoadingTree: boolean;
+  isLoadingFile: boolean;
+  isSaving: boolean;
+
+  // Mobile workspace sync status
+  mobileWorkspaceSync: MobileWorkspaceSyncStatus;
+  setMobileWorkspaceSync: (patch: Partial<MobileWorkspaceSyncStatus>) => void;
+
+  // Actions
+  setVaultPath: (path: string) => Promise<void>;
+  refreshFileTree: () => Promise<void>;
+  openFile: (path: string, options?: { addToHistory?: boolean; forceReload?: boolean; preview?: boolean }) => Promise<void>;
+  updateContent: (content: string, source?: "user" | "ai", description?: string) => void;
+  save: () => Promise<void>;
+  closeFile: () => void;
+
+  // Tab actions
+  switchTab: (index: number) => void;
+  closeTab: (index: number) => Promise<void>;
+  closeOtherTabs: (index: number) => Promise<void>;
+  closeAllTabs: () => Promise<void>;
+  reorderTabs: (fromIndex: number, toIndex: number) => void;
+  togglePinTab: (index: number) => void;
+  promotePreviewTab: (tabId?: string) => void;
+  updateTabPath: (oldPath: string, newPath: string) => void;
+
+  // Create new file
+  createNewFile: (fileName?: string) => Promise<void>;
+
+  // Open special tabs
+  openGraphTab: () => void;
+  openTypesettingPreviewTab: () => void;
+  openTypesettingDocTab: (path: string, addToHistory?: boolean) => Promise<void>;
+  openIsolatedGraphTab: (node: IsolatedNodeInfo) => void;
+  openVideoNoteTab: (url: string, title?: string) => void;
+  openVideoNoteFromContent: (content: string, title?: string) => void;
+  openDatabaseTab: (dbId: string, dbName: string) => void;
+  openPDFTab: (pdfPath: string) => void;
+  openDiagramTab: (diagramPath: string) => void;
+  openAIMainTab: () => void;
+  openWebpageTab: (url: string, title?: string) => void;
+  updateWebpageTab: (tabId: string, url?: string, title?: string) => void;
+  openFlashcardTab: (deckId?: string) => void;
+  openCardFlowTab: () => void;
+  openImageManagerTab: () => void;
+  openPluginViewTab: (viewType: string, title: string, html: string) => void;
+
+  // Undo/Redo actions
+  undo: () => void;
+  redo: () => void;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
+  pushHistory: (type: "user" | "ai", description?: string) => void;
+
+  // Navigation actions
+  goBack: () => void;
+  goForward: () => void;
+  canGoBack: () => boolean;
+  canGoForward: () => boolean;
+
+  // File sync actions
+  reloadFileIfOpen: (path: string, options?: { skipIfDirty?: boolean }) => Promise<void>;
+
+  // Move file/folder actions
+  moveFileToFolder: (sourcePath: string, targetFolder: string) => Promise<void>;
+  moveFolderToFolder: (sourcePath: string, targetFolder: string) => Promise<void>;
+
+  // Workspace actions
+  clearVault: () => void;
+  syncMobileWorkspace: (options?: { path?: string; force?: boolean }) => Promise<void>;
+}
+
+// 用户编辑的 debounce 时间（毫秒）
+const USER_EDIT_DEBOUNCE = 1000;
+let lastUserEditTime = 0;
+
+// 撤销历史最大条数（防止内存泄漏）
+const MAX_UNDO_HISTORY = 50;
+
+const normalizePathForComparison = (path: string) => path.replace(/\\/g, "/").toLowerCase();
+
+const DIAGRAM_FILE_SUFFIXES = [".excalidraw.json", ".diagram.json", ".drawio.json"] as const;
+
+const getDiagramDisplayName = (path: string) => {
+  const t = getCurrentTranslations();
+  const fileName = path.split(/[/\\]/).pop() || t.diagramView.defaultSource;
+  const lower = fileName.toLowerCase();
+  for (const suffix of DIAGRAM_FILE_SUFFIXES) {
+    if (lower.endsWith(suffix)) {
+      return fileName.slice(0, fileName.length - suffix.length) || t.diagramView.defaultSource;
+    }
+  }
+  return fileName;
+};
+
+const joinVaultPath = (vaultPath: string, relativePath: string) => {
+  const separator = vaultPath.includes("\\") ? "\\" : "/";
+  return `${vaultPath.replace(/[\\/]+$/, "")}${separator}${relativePath.replace(/[\\/]/g, separator)}`;
+};
+
+const findFilePath = (
+  entries: FileEntry[],
+  predicate: (entry: FileEntry, normalizedPath: string) => boolean,
+): string | null => {
+  for (const entry of entries) {
+    const normalizedPath = normalizePathForComparison(entry.path);
+    if (entry.is_dir && entry.children) {
+      const nested = findFilePath(entry.children, predicate);
+      if (nested) return nested;
+      continue;
+    }
+    if (predicate(entry, normalizedPath)) {
+      return entry.path;
+    }
+  }
+  return null;
+};
+
+const findDatabaseFilePath = (entries: FileEntry[], dbId: string): string | null => {
+  const normalizedSuffix = `/databases/${dbId}.db.json`;
+  const fileName = `${dbId}.db.json`.toLowerCase();
+  return findFilePath(
+    entries,
+    (entry, normalizedPath) =>
+      normalizedPath.endsWith(normalizedSuffix) || entry.name.toLowerCase() === fileName,
+  );
+};
+
+const warnAiFocusedFeatureDisabled = (
+  sourceMethod: string,
+  action: string,
+  userMessage: string,
+  context?: Record<string, unknown>,
+) => {
+  reportOperationError({
+    source: `FileStore.${sourceMethod}`,
+    action,
+    error: new Error(userMessage),
+    userMessage,
+    level: "warning",
+    context,
+  });
+};
+
+const MOBILE_WORKSPACE_SYNC_INTERVAL = 10_000;
+let lastMobileWorkspaceSync: { path: string | null; at: number } = { path: null, at: 0 };
+
+/**
+ * Sync workspace path to Tauri's allowed filesystem roots.
+ * This must be called before any file operations on the vault path.
+ * Exported for testing purposes.
+ */
+export async function syncWorkspaceAccessRoots(path: string): Promise<void> {
+  useWorkspaceStore.getState().registerWorkspace(path);
+  const workspacePaths = Array.from(
+    new Set([path, ...useWorkspaceStore.getState().workspaces.map((workspace) => workspace.path)])
+  );
+  await invoke("fs_set_allowed_roots", { roots: workspacePaths });
+}
+
+// 限制 undoStack 大小的辅助函数
+function trimUndoStack(stack: HistoryEntry[]): HistoryEntry[] {
+  if (stack.length <= MAX_UNDO_HISTORY) return stack;
+  // 移除最旧的记录，保留最新的 MAX_UNDO_HISTORY 条
+  return stack.slice(stack.length - MAX_UNDO_HISTORY);
+}
+
+export const useFileStore = create<FileState>()(
+  persist(
+    (set, get) => ({
+      // Initial state
+      vaultPath: null,
+      fileTree: [],
+
+      // Tabs
+      tabs: [],
+      activeTabIndex: -1,
+
+      currentFile: null,
+      currentContent: "",
+      isDirty: false,
+      isLoadingTree: false,
+      isLoadingFile: false,
+      isSaving: false,
+      mobileWorkspaceSync: {
+        status: "idle",
+        path: null,
+        lastInvokeAt: null,
+        lastConfirmedAt: null,
+        error: null,
+        source: null,
+      },
+      setMobileWorkspaceSync: (patch) => {
+        set((state) => ({
+          mobileWorkspaceSync: {
+            ...state.mobileWorkspaceSync,
+            ...patch,
+          },
+        }));
+      },
+
+      // Undo/Redo state
+      undoStack: [],
+      redoStack: [],
+      lastSavedContent: "",
+
+      // Navigation history
+      navigationHistory: [],
+      navigationIndex: -1,
+      recentFiles: [],
+
+      // Set vault path and load file tree
+      setVaultPath: async (path: string) => {
+        try {
+          await syncWorkspaceAccessRoots(path);
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.setVaultPath",
+            action: "Sync workspace access roots",
+            error,
+            level: "warning",
+            context: { path },
+          });
+        }
+        set({ vaultPath: path, isLoadingTree: true });
+        try {
+          try {
+            await createDir(`${path}/.mindflow`);
+          } catch (error) {
+            reportOperationError({
+              source: "FileStore.setVaultPath",
+              action: "Create .mindflow directory",
+              error,
+              level: "warning",
+              context: { path },
+            });
+          }
+          try {
+            await createDir(`${path}/.mindflow/skills`);
+          } catch (error) {
+            reportOperationError({
+              source: "FileStore.setVaultPath",
+              action: "Create workspace skills directory",
+              error,
+              level: "warning",
+              context: { path },
+            });
+          }
+          try {
+            await createDir(`${path}/.mindflow/plugins`);
+          } catch (error) {
+            reportOperationError({
+              source: "FileStore.setVaultPath",
+              action: "Create workspace plugins directory",
+              error,
+              level: "warning",
+              context: { path },
+            });
+          }
+          const tree = await listDirectory(path);
+          set({ fileTree: tree, isLoadingTree: false });
+          const openClawStore = useOpenClawWorkspaceStore.getState();
+          await openClawStore.refreshWorkspace(path, { fileTree: tree });
+          await get().syncMobileWorkspace({ path, force: true });
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.setVaultPath",
+            action: "Open workspace",
+            error,
+            context: { path },
+          });
+          useOpenClawWorkspaceStore.getState().markUnavailable(path);
+          set({ isLoadingTree: false });
+        }
+      },
+
+      // Refresh file tree
+      refreshFileTree: async () => {
+        const { vaultPath } = get();
+        if (!vaultPath) return;
+
+        set({ isLoadingTree: true });
+        try {
+          const tree = await listDirectory(vaultPath);
+          set({ fileTree: tree, isLoadingTree: false });
+          const openClawStore = useOpenClawWorkspaceStore.getState();
+          await openClawStore.refreshWorkspace(vaultPath, { fileTree: tree });
+          useFavoriteStore.getState().pruneMissing(tree);
+          void get().syncMobileWorkspace();
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.refreshFileTree",
+            action: "Refresh file tree",
+            error,
+            context: { vaultPath },
+          });
+          useOpenClawWorkspaceStore.getState().markUnavailable(vaultPath);
+          set({ isLoadingTree: false });
+        }
+      },
+
+      // Open a file
+      openFile: async (path: string, options?: { addToHistory?: boolean; forceReload?: boolean; preview?: boolean }) => {
+        const addToHistory = options?.addToHistory ?? true;
+        const forceReload = options?.forceReload ?? false;
+        const preview = options?.preview ?? false;
+
+        const t = getCurrentTranslations();
+        const { tabs, activeTabIndex, navigationHistory, navigationIndex } = get();
+
+        // Normalize paths for comparison (handle Windows backslashes)
+        const normalize = (p: string) => p.replace(/\\/g, "/");
+        const targetPath = normalize(path);
+
+        // 检查是否已经在标签页中打开（作为永久标签）
+        const existingTabIndex = tabs.findIndex(tab => normalize(tab.path) === targetPath);
+        if (existingTabIndex !== -1) {
+          // 已有此标签页
+          if (forceReload) {
+            // 强制重新加载内容（Agent 编辑后使用）
+            try {
+              const newContent = await readFile(path);
+              const updatedTabs = [...tabs];
+              updatedTabs[existingTabIndex] = {
+                ...updatedTabs[existingTabIndex],
+                content: newContent,
+                isDirty: false,
+              };
+              set({
+                tabs: updatedTabs,
+                activeTabIndex: existingTabIndex,
+                currentFile: path,
+                currentContent: newContent,
+                isDirty: false,
+                lastSavedContent: newContent,
+              });
+            } catch (error) {
+              reportOperationError({
+                source: "FileStore.openFile",
+                action: "Reload file",
+                error,
+                context: { path },
+              });
+              // 即使重载失败也切换到该标签页
+              get().switchTab(existingTabIndex);
+            }
+          } else {
+            // 直接切换到已有标签页（preview 请求被忽略，因为文件已经打开了）
+            get().switchTab(existingTabIndex);
+          }
+          return;
+        }
+
+        // 保存当前标签页的状态
+        if (activeTabIndex >= 0 && tabs[activeTabIndex]) {
+          const currentTab = tabs[activeTabIndex];
+          if (currentTab.isDirty) {
+            await get().save();
+          }
+        }
+
+        set({ isLoadingFile: true });
+        try {
+          const content = await readFile(path);
+          console.log("[mindflow][openFile]", {
+            path,
+            contentLength: content.length,
+            preview,
+            forceReload,
+          });
+          const fileName = path.split(/[/\\]/).pop()?.replace(/\.(md|docx)$/i, "") || t.common.untitled;
+
+          // 创建新标签页
+          const newTab: Tab = {
+            id: path,
+            type: "file",
+            path,
+            name: fileName,
+            content,
+            isDirty: false,
+            isPreview: preview || undefined,
+            undoStack: [],
+            redoStack: [],
+          };
+
+          // Re-read tabs from store — the array captured before the awaits may be stale
+          const currentTabs = get().tabs;
+
+          let newTabs: Tab[];
+          let newTabIndex: number;
+
+          if (preview) {
+            // 查找已有的 preview tab
+            const existingPreviewIndex = currentTabs.findIndex(tab => tab.isPreview);
+            if (existingPreviewIndex !== -1) {
+              const existingPreview = currentTabs[existingPreviewIndex];
+              // 防御性检查：如果 preview tab 有未保存更改，先提升它
+              if (existingPreview.isDirty) {
+                get().promotePreviewTab(existingPreview.id);
+                // 重新读取 tabs（promotePreviewTab 已更新 store）
+                const freshTabs = get().tabs;
+                newTabs = [...freshTabs, newTab];
+                newTabIndex = newTabs.length - 1;
+              } else {
+                // 替换现有 preview tab
+                newTabs = [...currentTabs];
+                newTabs[existingPreviewIndex] = newTab;
+                newTabIndex = existingPreviewIndex;
+              }
+            } else {
+              newTabs = [...currentTabs, newTab];
+              newTabIndex = newTabs.length - 1;
+            }
+          } else {
+            newTabs = [...currentTabs, newTab];
+            newTabIndex = newTabs.length - 1;
+          }
+
+          // 更新导航历史
+          let newHistory = get().navigationHistory;
+          let newNavIndex = get().navigationIndex;
+
+          if (addToHistory) {
+            newHistory = navigationHistory.slice(0, navigationIndex + 1);
+            newHistory.push(path);
+            newNavIndex = newHistory.length - 1;
+
+            if (newHistory.length > 50) {
+              newHistory = newHistory.slice(-50);
+              newNavIndex = newHistory.length - 1;
+            }
+          }
+
+          // 更新最近文件列表
+          const { recentFiles } = get();
+          let newRecentFiles = recentFiles.filter(p => p !== path);
+          newRecentFiles.push(path);
+          if (newRecentFiles.length > 20) {
+            newRecentFiles = newRecentFiles.slice(-20);
+          }
+
+          set({
+            tabs: newTabs,
+            activeTabIndex: newTabIndex,
+            currentFile: path,
+            currentContent: content,
+            isDirty: false,
+            isLoadingFile: false,
+            undoStack: [],
+            redoStack: [],
+            lastSavedContent: content,
+            navigationHistory: newHistory,
+            navigationIndex: newNavIndex,
+            recentFiles: newRecentFiles,
+          });
+          useFavoriteStore.getState().markOpened(path);
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.openFile",
+            action: "Open file",
+            error,
+            context: { path },
+          });
+          set({ isLoadingFile: false });
+        }
+      },
+
+      // 切换标签页
+      switchTab: (index: number) => {
+        const { tabs, activeTabIndex, currentContent, isDirty, undoStack, redoStack } = get();
+        if (index < 0 || index >= tabs.length || index === activeTabIndex) return;
+
+        // 保存当前标签页的状态
+        if (activeTabIndex >= 0 && tabs[activeTabIndex]) {
+          const updatedTabs = [...tabs];
+          updatedTabs[activeTabIndex] = {
+            ...updatedTabs[activeTabIndex],
+            content: currentContent,
+            isDirty,
+            undoStack,
+            redoStack,
+          };
+
+          // 切换到新标签页
+          const targetTab = updatedTabs[index];
+          set({
+            tabs: updatedTabs,
+            activeTabIndex: index,
+            currentFile: targetTab.path,
+            currentContent: targetTab.content,
+            isDirty: targetTab.isDirty,
+            undoStack: targetTab.undoStack,
+            redoStack: targetTab.redoStack,
+            lastSavedContent: targetTab.content,
+          });
+        } else {
+          // 没有当前标签页，直接切换
+          const targetTab = tabs[index];
+          set({
+            activeTabIndex: index,
+            currentFile: targetTab.path,
+            currentContent: targetTab.content,
+            isDirty: targetTab.isDirty,
+            undoStack: targetTab.undoStack,
+            redoStack: targetTab.redoStack,
+            lastSavedContent: targetTab.content,
+          });
+        }
+      },
+
+      // 关闭标签页
+      closeTab: async (index: number) => {
+        const { tabs, activeTabIndex, currentContent, isDirty, undoStack, redoStack } = get();
+        if (index < 0 || index >= tabs.length) return;
+
+        const tabToClose = tabs[index];
+
+        // 固定标签不能关闭
+        if (tabToClose.isPinned) return;
+
+        // 如果要关闭的是当前标签页且有未保存的更改，先保存
+        if (index === activeTabIndex && isDirty) {
+          await get().save();
+        } else if (tabs[index].isDirty) {
+          // 非当前标签页但有未保存更改，也保存
+          await saveFile(tabs[index].path, tabs[index].content);
+        }
+
+        const newTabs = tabs.filter((_, i) => i !== index);
+
+        if (newTabs.length === 0) {
+          // 没有标签页了
+          set({
+            tabs: [],
+            activeTabIndex: -1,
+            currentFile: null,
+            currentContent: "",
+            isDirty: false,
+            undoStack: [],
+            redoStack: [],
+          });
+        } else {
+          // 还有其他标签页
+          let newActiveIndex = activeTabIndex;
+
+          if (index === activeTabIndex) {
+            // 关闭的是当前标签页
+            newActiveIndex = Math.min(index, newTabs.length - 1);
+          } else if (index < activeTabIndex) {
+            // 关闭的是当前标签页前面的
+            newActiveIndex = activeTabIndex - 1;
+          }
+
+          // 先更新 tabs
+          if (index !== activeTabIndex && activeTabIndex >= 0 && tabs[activeTabIndex]) {
+            // 保存当前标签页状态到新的 tabs 数组
+            const currentTabNewIndex = activeTabIndex > index ? activeTabIndex - 1 : activeTabIndex;
+            if (currentTabNewIndex >= 0 && newTabs[currentTabNewIndex]) {
+              newTabs[currentTabNewIndex] = {
+                ...newTabs[currentTabNewIndex],
+                content: currentContent,
+                isDirty,
+                undoStack,
+                redoStack,
+              };
+            }
+          }
+
+          const targetTab = newTabs[newActiveIndex];
+          set({
+            tabs: newTabs,
+            activeTabIndex: newActiveIndex,
+            currentFile: targetTab.path,
+            currentContent: targetTab.content,
+            isDirty: targetTab.isDirty,
+            undoStack: targetTab.undoStack,
+            redoStack: targetTab.redoStack,
+            lastSavedContent: targetTab.content,
+          });
+        }
+      },
+
+      // 关闭其他标签页（保留固定标签）
+      
+      // Close other tabs (keep pinned + target)
+      closeOtherTabs: async (index: number) => {
+        const { tabs } = get();
+        if (index < 0 || index >= tabs.length) return;
+
+        const targetTab = tabs[index];
+
+        // Save tabs that will be closed
+        for (const tab of tabs) {
+          if (tab.id === targetTab.id || tab.isPinned) {
+            continue;
+          }
+          if (tab.isDirty) {
+            await saveFile(tab.path, tab.content);
+          }
+        }
+
+        const remainingTabs = tabs.filter(tab => tab.isPinned || tab.id === targetTab.id);
+        const newActiveIndex = remainingTabs.findIndex(t => t.id === targetTab.id);
+
+        set({
+          tabs: remainingTabs,
+          activeTabIndex: newActiveIndex >= 0 ? newActiveIndex : 0,
+          currentFile: targetTab.path,
+          currentContent: targetTab.content,
+          isDirty: false,
+          undoStack: targetTab.undoStack,
+          redoStack: targetTab.redoStack,
+        });
+      },
+
+      // Close all tabs (keep pinned)
+      closeAllTabs: async () => {
+        const { tabs } = get();
+
+        // Save tabs that will be closed
+        for (const tab of tabs) {
+          if (tab.isPinned) {
+            continue;
+          }
+          if (tab.isDirty) {
+            await saveFile(tab.path, tab.content);
+          }
+        }
+
+        const pinnedTabs = tabs.filter(tab => tab.isPinned);
+
+        if (pinnedTabs.length === 0) {
+          set({
+            tabs: [],
+            activeTabIndex: -1,
+            currentFile: null,
+            currentContent: "",
+            isDirty: false,
+            undoStack: [],
+            redoStack: [],
+          });
+        } else {
+          const firstPinned = pinnedTabs[0];
+          set({
+            tabs: pinnedTabs,
+            activeTabIndex: 0,
+            currentFile: firstPinned.path,
+            currentContent: firstPinned.content,
+            isDirty: firstPinned.isDirty,
+            undoStack: firstPinned.undoStack,
+            redoStack: firstPinned.redoStack,
+          });
+        }
+      },
+
+      // Update tab path (for rename)
+      updateTabPath: (oldPath: string, newPath: string) => {
+        const t = getCurrentTranslations();
+        const { tabs, currentFile } = get();
+
+        // 查找并更新所有匹配的标签页
+        const updatedTabs = tabs.map(tab => {
+          if (
+            (tab.type === "file" || tab.type === "diagram") &&
+            tab.path === oldPath
+          ) {
+            const nextName =
+              tab.type === "diagram"
+                ? getDiagramDisplayName(newPath)
+                : newPath.split(/[/\\]/).pop()?.replace(/\.md$/i, "") || t.common.untitled;
+            return {
+              ...tab,
+              path: newPath,
+              name: nextName,
+              id: newPath, // 更新 id 以匹配新路径
+            };
+          }
+          return tab;
+        });
+
+        // 如果当前打开的是被重命名的文件，更新 currentFile
+        const newState: Partial<FileState> = { tabs: updatedTabs };
+        if (currentFile === oldPath) {
+          newState.currentFile = newPath;
+        }
+
+        set(newState);
+        useFavoriteStore.getState().updatePath(oldPath, newPath);
+      },
+
+      // 重新排序标签页
+      reorderTabs: (fromIndex: number, toIndex: number) => {
+        const { tabs, activeTabIndex } = get();
+        if (fromIndex === toIndex) return;
+        if (fromIndex < 0 || fromIndex >= tabs.length) return;
+        if (toIndex < 0 || toIndex >= tabs.length) return;
+
+        const movedTab = tabs[fromIndex];
+        const pinnedCount = tabs.filter(t => t.isPinned).length;
+
+        // 固定标签只能在固定区域内移动，非固定标签不能移到固定区域
+        if (movedTab.isPinned) {
+          // 固定标签不能移到非固定区域
+          if (toIndex >= pinnedCount) return;
+        } else {
+          // 非固定标签不能移到固定区域
+          if (toIndex < pinnedCount) return;
+        }
+
+        const newTabs = [...tabs];
+        newTabs.splice(fromIndex, 1);
+        newTabs.splice(toIndex, 0, movedTab);
+
+        // 更新活动标签页索引
+        let newActiveIndex = activeTabIndex;
+        if (activeTabIndex === fromIndex) {
+          newActiveIndex = toIndex;
+        } else if (fromIndex < activeTabIndex && toIndex >= activeTabIndex) {
+          newActiveIndex = activeTabIndex - 1;
+        } else if (fromIndex > activeTabIndex && toIndex <= activeTabIndex) {
+          newActiveIndex = activeTabIndex + 1;
+        }
+
+        set({ tabs: newTabs, activeTabIndex: newActiveIndex });
+      },
+
+      // 固定/取消固定标签页
+      togglePinTab: (index: number) => {
+        const { tabs, activeTabIndex } = get();
+        if (index < 0 || index >= tabs.length) return;
+
+        const tab = tabs[index];
+        const newIsPinned = !tab.isPinned;
+        const newTabs = [...tabs];
+
+        // Pinning a preview tab also promotes it
+        newTabs[index] = {
+          ...tab,
+          isPinned: newIsPinned,
+          isPreview: newIsPinned ? undefined : tab.isPreview,
+        };
+
+        // 重新排序：固定的标签移到最前面
+        const pinnedTabs = newTabs.filter(t => t.isPinned);
+        const unpinnedTabs = newTabs.filter(t => !t.isPinned);
+        const sortedTabs = [...pinnedTabs, ...unpinnedTabs];
+
+        // 找到当前活动标签在新数组中的位置
+        const activeTabId = tabs[activeTabIndex]?.id;
+        const newActiveIndex = sortedTabs.findIndex(t => t.id === activeTabId);
+
+        set({
+          tabs: sortedTabs,
+          activeTabIndex: newActiveIndex >= 0 ? newActiveIndex : 0
+        });
+      },
+
+      promotePreviewTab: (tabId?: string) => {
+        const { tabs } = get();
+        const targetIndex = tabId
+          ? tabs.findIndex(t => t.id === tabId)
+          : tabs.findIndex(t => t.isPreview);
+        if (targetIndex === -1) return;
+        const tab = tabs[targetIndex];
+        if (!tab.isPreview) return;
+
+        const newTabs = [...tabs];
+        newTabs[targetIndex] = { ...tab, isPreview: undefined };
+        set({ tabs: newTabs });
+      },
+
+      // 打开图谱标签页
+      openGraphTab: () => {
+        const { tabs, activeTabIndex, currentContent, isDirty, undoStack, redoStack } = get();
+
+        // 检查是否已经打开
+        const existingIndex = tabs.findIndex(tab => tab.type === "graph");
+        if (existingIndex !== -1) {
+          get().switchTab(existingIndex);
+          return;
+        }
+
+        // 保存当前标签页状态
+        let updatedTabs = [...tabs];
+        if (activeTabIndex >= 0 && tabs[activeTabIndex]) {
+          updatedTabs[activeTabIndex] = {
+            ...updatedTabs[activeTabIndex],
+            content: currentContent,
+            isDirty,
+            undoStack,
+            redoStack,
+          };
+        }
+
+        // 创建图谱标签页
+        const t = getCurrentTranslations();
+        const graphTab: Tab = {
+          id: "__graph__",
+          type: "graph",
+          path: "",
+          name: t.graph.title,
+          content: "",
+          isDirty: false,
+          undoStack: [],
+          redoStack: [],
+        };
+
+        updatedTabs.push(graphTab);
+
+        set({
+          tabs: updatedTabs,
+          activeTabIndex: updatedTabs.length - 1,
+          currentFile: null,
+          currentContent: "",
+          isDirty: false,
+        });
+      },
+
+      // 打开主视图区 AI 聊天标签页
+      // Typesetting preview tab (scaffold)
+      openTypesettingPreviewTab: () => {
+        warnAiFocusedFeatureDisabled(
+          "openTypesettingPreviewTab",
+          "Open typesetting preview",
+          "Typesetting preview is disabled in this AI-focused build.",
+        );
+      },
+
+      openTypesettingDocTab: async (path: string, addToHistory: boolean = true) => {
+        warnAiFocusedFeatureDisabled(
+          "openTypesettingDocTab",
+          "Open typesetting document",
+          "DOCX typesetting preview is disabled in this AI-focused build.",
+          { path, addToHistory },
+        );
+      },
+
+      openAIMainTab: () => {
+        const t = getCurrentTranslations();
+        const { tabs, activeTabIndex, currentContent, isDirty, undoStack, redoStack } = get();
+
+        // 如果已经有 ai-chat 标签页，直接切换
+        const existingIndex = tabs.findIndex((tab) => tab.type === "ai-chat");
+        if (existingIndex !== -1) {
+          get().switchTab(existingIndex);
+          return;
+        }
+
+        // 保存当前标签页状态
+        let updatedTabs = [...tabs];
+        if (activeTabIndex >= 0 && tabs[activeTabIndex]) {
+          updatedTabs[activeTabIndex] = {
+            ...updatedTabs[activeTabIndex],
+            content: currentContent,
+            isDirty,
+            undoStack,
+            redoStack,
+          };
+        }
+
+        // 创建 AI 聊天标签页
+        const aiTab: Tab = {
+          id: "__ai_chat__",
+          type: "ai-chat",
+          path: "",
+          name: t.common.aiChatTab,
+          content: "",
+          isDirty: false,
+          undoStack: [],
+          redoStack: [],
+        };
+
+        updatedTabs.push(aiTab);
+
+        set({
+          tabs: updatedTabs,
+          activeTabIndex: updatedTabs.length - 1,
+          currentFile: null,
+          currentContent: "",
+          isDirty: false,
+          undoStack: [],
+          redoStack: [],
+          lastSavedContent: "",
+        });
+      },
+
+      // 打开孤立图谱标签页
+      openIsolatedGraphTab: (node: IsolatedNodeInfo) => {
+        const t = getCurrentTranslations();
+        const { tabs, activeTabIndex, currentContent, isDirty, undoStack, redoStack } = get();
+
+        // 每次都创建新标签页（允许多个孤立视图）
+        const tabId = `__isolated_${node.id}_${Date.now()}__`;
+
+        // 保存当前标签页状态
+        let updatedTabs = [...tabs];
+        if (activeTabIndex >= 0 && tabs[activeTabIndex]) {
+          updatedTabs[activeTabIndex] = {
+            ...updatedTabs[activeTabIndex],
+            content: currentContent,
+            isDirty,
+            undoStack,
+            redoStack,
+          };
+        }
+
+        // 创建孤立图谱标签页
+        const isolatedTab: Tab = {
+          id: tabId,
+          type: "isolated-graph",
+          path: node.path,
+          name: t.graph.isolatedPrefix.replace("{name}", node.label),
+          content: "",
+          isDirty: false,
+          undoStack: [],
+          redoStack: [],
+          isolatedNode: node,
+        };
+
+        updatedTabs.push(isolatedTab);
+
+        set({
+          tabs: updatedTabs,
+          activeTabIndex: updatedTabs.length - 1,
+          currentFile: null,
+          currentContent: "",
+          isDirty: false,
+        });
+      },
+
+      // 打开视频笔记标签页（单例模式：只允许一个视频标签页）
+      openVideoNoteTab: (url: string, title?: string) => {
+        warnAiFocusedFeatureDisabled(
+          "openVideoNoteTab",
+          "Open video note",
+          "Video note is disabled in this AI-focused build.",
+          { url, title },
+        );
+      },
+
+      // 从已分享的 Markdown 内容打开视频笔记（支持识别并加载时间戳）
+      openVideoNoteFromContent: (content: string, title?: string) => {
+        warnAiFocusedFeatureDisabled(
+          "openVideoNoteFromContent",
+          "Open video note from content",
+          "Video note is disabled in this AI-focused build.",
+          { title, contentLength: content.length },
+        );
+      },
+
+      // 打开数据库标签页
+      openDatabaseTab: (dbId: string, dbName: string) => {
+        const { fileTree, vaultPath } = get();
+        const databasePath =
+          findDatabaseFilePath(fileTree, dbId) ??
+          (vaultPath ? joinVaultPath(vaultPath, `Databases/${dbId}.db.json`) : null);
+
+        if (!databasePath) {
+          warnAiFocusedFeatureDisabled(
+            "openDatabaseTab",
+            "Open database view",
+            "Database view is disabled in this AI-focused build.",
+            { dbId, dbName },
+          );
+          return;
+        }
+
+        warnAiFocusedFeatureDisabled(
+          "openDatabaseTab",
+          "Open database view",
+          "Database view is disabled in this AI-focused build. Opening the database definition file instead.",
+          { dbId, dbName, databasePath },
+        );
+        void get().openFile(databasePath);
+      },
+
+      // 打开 PDF 标签页
+      openPDFTab: (pdfPath: string) => {
+        warnAiFocusedFeatureDisabled(
+          "openPDFTab",
+          "Open PDF preview",
+          "PDF preview is disabled in this AI-focused build.",
+          { pdfPath },
+        );
+      },
+
+      // 打开 Diagram 标签页
+      openDiagramTab: (diagramPath: string) => {
+        warnAiFocusedFeatureDisabled(
+          "openDiagramTab",
+          "Open diagram view",
+          "Diagram view is disabled in this AI-focused build. Opening the source file instead.",
+          { diagramPath },
+        );
+        void get().openFile(diagramPath);
+      },
+
+      // 打开卡片流标签页
+      openCardFlowTab: () => {
+        warnAiFocusedFeatureDisabled(
+          "openCardFlowTab",
+          "Open card flow",
+          "Card flow is disabled in this AI-focused build.",
+        );
+      },
+
+      openImageManagerTab: () => {
+        warnAiFocusedFeatureDisabled(
+          "openImageManagerTab",
+          "Open image manager",
+          "Image manager is disabled in this AI-focused build.",
+        );
+      },
+
+      openPluginViewTab: (viewType: string, title: string, html: string) => {
+        warnAiFocusedFeatureDisabled(
+          "openPluginViewTab",
+          "Open plugin view",
+          "Plugin views are disabled in this AI-focused build.",
+          { viewType, title, htmlLength: html.length },
+        );
+      },
+
+      // 打开网页标签页
+      openWebpageTab: (url: string, title?: string) => {
+        warnAiFocusedFeatureDisabled(
+          "openWebpageTab",
+          "Open webpage tab",
+          "Webpage tabs are disabled in this AI-focused build.",
+          { url, title },
+        );
+      },
+
+      // 更新网页标签页信息
+      updateWebpageTab: (tabId: string, url?: string, title?: string) => {
+        warnAiFocusedFeatureDisabled(
+          "updateWebpageTab",
+          "Update webpage tab",
+          "Webpage tabs are disabled in this AI-focused build.",
+          { tabId, url, title },
+        );
+      },
+
+      // 打开闪卡标签页
+      openFlashcardTab: (deckId?: string) => {
+        warnAiFocusedFeatureDisabled(
+          "openFlashcardTab",
+          "Open flashcard review",
+          "Flashcard review is disabled in this AI-focused build.",
+          { deckId },
+        );
+      },
+
+      // 创建新文件
+      createNewFile: async (fileName?: string) => {
+        const t = getCurrentTranslations();
+        const { vaultPath, refreshFileTree, openFile } = get();
+        if (!vaultPath) return;
+
+        const separator = vaultPath.includes("\\") ? "\\" : "/";
+
+        // 生成文件名
+        let name = fileName;
+        if (!name) {
+          // 生成默认文件名：未命名、未命名 1、未命名 2...
+          const baseName = t.common.untitled;
+          let counter = 0;
+          let finalName = baseName;
+
+          // 检查文件是否存在
+          const checkPath = () => `${vaultPath}${separator}${finalName}.md`;
+
+          // 简单检查 - 尝试创建，如果失败则增加计数器
+          while (true) {
+            try {
+              await createFile(checkPath());
+              break;
+            } catch {
+              counter++;
+              finalName = `${baseName} ${counter}`;
+              if (counter > 100) {
+                reportOperationError({
+                  source: "FileStore.createNewFile",
+                  action: "Generate untitled file name",
+                  error: "Too many untitled files",
+                  context: { vaultPath },
+                });
+                return;
+              }
+            }
+          }
+
+          await refreshFileTree();
+          await openFile(checkPath());
+          return;
+        }
+
+        // 使用指定文件名
+        const newPath = `${vaultPath}${separator}${name}.md`;
+        try {
+          await createFile(newPath);
+          await refreshFileTree();
+          await openFile(newPath);
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.createNewFile",
+            action: "Create file",
+            error,
+            context: { newPath },
+          });
+        }
+      },
+
+      // 手动推入历史记录（AI 修改时使用）
+      pushHistory: (type: "user" | "ai", description?: string) => {
+        const { currentContent, undoStack } = get();
+        const entry: HistoryEntry = {
+          content: currentContent,
+          type,
+          timestamp: Date.now(),
+          description,
+        };
+        const newUndoStack = trimUndoStack([...undoStack, entry]);
+        set({
+          undoStack: newUndoStack,
+          redoStack: [], // 清空重做栈
+        });
+      },
+
+      // Update content (marks as dirty)
+      updateContent: (content: string, source: "user" | "ai" = "user", description?: string) => {
+        const { currentContent, undoStack, tabs, activeTabIndex } = get();
+        const now = Date.now();
+
+        // 如果内容没变，不做任何处理
+        if (content === currentContent) return;
+
+        // Auto-promote preview tab on first edit
+        const activeTab = tabs[activeTabIndex];
+        if (activeTab?.isPreview) {
+          get().promotePreviewTab(activeTab.id);
+        }
+
+        if (source === "ai") {
+          const t = getCurrentTranslations();
+          // AI 修改：总是创建新的撤销点
+          const entry: HistoryEntry = {
+            content: currentContent, // 保存修改前的内容
+            type: "ai",
+            timestamp: now,
+            description: description || t.ai.editChangeLabel,
+          };
+          const newUndoStack = trimUndoStack([...undoStack, entry]);
+          set({
+            currentContent: content,
+            isDirty: true,
+            undoStack: newUndoStack,
+            redoStack: [],
+          });
+        } else {
+          // 用户编辑：合并短时间内的编辑
+          if (now - lastUserEditTime > USER_EDIT_DEBOUNCE || undoStack.length === 0) {
+            // 超过 debounce 时间，创建新撤销点
+            const entry: HistoryEntry = {
+              content: currentContent,
+              type: "user",
+              timestamp: now,
+            };
+            const newUndoStack = trimUndoStack([...undoStack, entry]);
+            set({
+              currentContent: content,
+              isDirty: true,
+              undoStack: newUndoStack,
+              redoStack: [],
+            });
+          } else {
+            // 在 debounce 时间内，只更新内容不创建新撤销点
+            set({ currentContent: content, isDirty: true });
+          }
+          lastUserEditTime = now;
+        }
+      },
+
+      // 撤销
+      undo: () => {
+        const t = getCurrentTranslations();
+        const { undoStack, currentContent, redoStack } = get();
+        if (undoStack.length === 0) return;
+
+        const lastEntry = undoStack[undoStack.length - 1];
+        const newUndoStack = undoStack.slice(0, -1);
+
+        // 将当前内容推入重做栈
+        const redoEntry: HistoryEntry = {
+          content: currentContent,
+          type: lastEntry.type,
+          timestamp: Date.now(),
+          description: lastEntry.description,
+        };
+
+        set({
+          currentContent: lastEntry.content,
+          undoStack: newUndoStack,
+          redoStack: [...redoStack, redoEntry],
+          isDirty: true,
+        });
+
+        // 显示撤销提示
+        if (lastEntry.type === "ai") {
+          console.log(`[Undo] 撤销 AI 修改: ${lastEntry.description || t.common.untitled}`);
+        }
+      },
+
+      // 重做
+      redo: () => {
+        const { redoStack, currentContent, undoStack } = get();
+        if (redoStack.length === 0) return;
+
+        const lastEntry = redoStack[redoStack.length - 1];
+        const newRedoStack = redoStack.slice(0, -1);
+
+        // 将当前内容推入撤销栈
+        const undoEntry: HistoryEntry = {
+          content: currentContent,
+          type: lastEntry.type,
+          timestamp: Date.now(),
+          description: lastEntry.description,
+        };
+
+        set({
+          currentContent: lastEntry.content,
+          redoStack: newRedoStack,
+          undoStack: [...undoStack, undoEntry],
+          isDirty: true,
+        });
+      },
+
+      // 检查是否可以撤销/重做
+      canUndo: () => get().undoStack.length > 0,
+      canRedo: () => get().redoStack.length > 0,
+
+      // Save current file
+      save: async () => {
+        const { currentFile, currentContent, isDirty, tabs, activeTabIndex } = get();
+        const activeTab = activeTabIndex >= 0 ? tabs[activeTabIndex] : null;
+
+        // Manual save promotes preview tab
+        if (activeTab?.isPreview) {
+          get().promotePreviewTab(activeTab.id);
+        }
+
+        if (!currentFile || !isDirty) return;
+
+        set({ isSaving: true });
+        try {
+          await saveFile(currentFile, currentContent);
+          set({ isDirty: false, isSaving: false, lastSavedContent: currentContent });
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.save",
+            action: "Save file",
+            error,
+            context: { path: currentFile },
+          });
+          set({ isSaving: false });
+        }
+      },
+
+      // Close current file (now closes current tab)
+      closeFile: () => {
+        const { activeTabIndex } = get();
+        if (activeTabIndex >= 0) {
+          get().closeTab(activeTabIndex);
+        }
+      },
+
+      // Navigation: Go back
+      goBack: () => {
+        const { navigationHistory, navigationIndex } = get();
+        if (navigationIndex > 0) {
+          const newIndex = navigationIndex - 1;
+          const path = navigationHistory[newIndex];
+          set({ navigationIndex: newIndex });
+          get().openFile(path, { addToHistory: false });
+        }
+      },
+
+      // Navigation: Go forward
+      goForward: () => {
+        const { navigationHistory, navigationIndex } = get();
+        if (navigationIndex < navigationHistory.length - 1) {
+          const newIndex = navigationIndex + 1;
+          const path = navigationHistory[newIndex];
+          set({ navigationIndex: newIndex });
+          get().openFile(path, { addToHistory: false });
+        }
+      },
+
+      // Check if can go back/forward
+      canGoBack: () => get().navigationIndex > 0,
+      canGoForward: () => {
+        const { navigationHistory, navigationIndex } = get();
+        return navigationIndex < navigationHistory.length - 1;
+      },
+
+      // Clear vault and reset to welcome screen
+      clearVault: () => {
+        set({
+          vaultPath: null,
+          fileTree: [],
+          tabs: [],
+          activeTabIndex: -1,
+          currentFile: null,
+          currentContent: "",
+          isDirty: false,
+          undoStack: [],
+          redoStack: [],
+          navigationHistory: [],
+          navigationIndex: -1,
+        });
+      },
+
+      syncMobileWorkspace: async (options) => {
+        const path = options?.path ?? get().vaultPath;
+        if (!path) {
+          get().setMobileWorkspaceSync({
+            status: "error",
+            path: null,
+            error: "workspace path missing",
+          });
+          return;
+        }
+        const now = Date.now();
+        if (!options?.force && lastMobileWorkspaceSync.path === path && now - lastMobileWorkspaceSync.at < MOBILE_WORKSPACE_SYNC_INTERVAL) {
+          return;
+        }
+        try {
+          get().setMobileWorkspaceSync({
+            status: "syncing",
+            path,
+            lastInvokeAt: now,
+            error: null,
+            source: "invoke",
+          });
+          await invoke("mobile_set_workspace", { workspacePath: path });
+          lastMobileWorkspaceSync = { path, at: now };
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.syncMobileWorkspace",
+            action: "Sync mobile workspace",
+            error,
+            level: "warning",
+            context: { path },
+          });
+          get().setMobileWorkspaceSync({
+            status: "error",
+            path,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      },
+
+      // Reload file if it's currently open (for external updates like database edits)
+      reloadFileIfOpen: async (path: string, options?: { skipIfDirty?: boolean }) => {
+        const { tabs, activeTabIndex, currentFile, currentContent, isDirty } = get();
+
+        // 查找该文件是否在标签页中打开
+        const tabIndex = tabs.findIndex(
+          (t) => (t.type === "file" || t.type === "diagram") && t.path === path
+        );
+        if (tabIndex === -1) return;
+
+        try {
+          const skipIfDirty = options?.skipIfDirty ?? false;
+          const targetTab = tabs[tabIndex];
+          const isActivePath = currentFile === path && tabIndex === activeTabIndex;
+          const isTargetDirty = isActivePath ? isDirty : targetTab?.isDirty;
+          if (skipIfDirty && isTargetDirty) {
+            return;
+          }
+
+          const newContent = await readFile(path);
+          const currentTabContent = isActivePath ? currentContent : targetTab.content;
+          if (newContent === currentTabContent) {
+            return;
+          }
+
+          const updatedTabs = tabs.map((tab, i) =>
+            i === tabIndex ? { ...tab, content: newContent, isDirty: false } : tab
+          );
+
+          // 如果是当前激活的标签页，同时更新 currentContent
+          if (tabIndex === activeTabIndex && currentFile === path) {
+            set({
+              tabs: updatedTabs,
+              currentContent: newContent,
+              lastSavedContent: newContent,
+              isDirty: false,
+            });
+          } else {
+            set({ tabs: updatedTabs });
+          }
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.reloadFileIfOpen",
+            action: "Reload open file",
+            error,
+            level: "warning",
+            context: { path },
+          });
+        }
+      },
+
+      // Move file to a target folder
+      moveFileToFolder: async (sourcePath: string, targetFolder: string) => {
+        const t = getCurrentTranslations();
+        const { tabs, currentFile, refreshFileTree, fileTree } = get();
+        
+        try {
+          const { isImagePath } = await import("@/services/assets/imageManager");
+
+          if (isImagePath(sourcePath)) {
+            const { executeImageMove } = await import("@/services/assets/imageOperations");
+            const preview = await executeImageMove(fileTree, [sourcePath], targetFolder);
+            const newPath = preview.changes[0]?.to ?? sourcePath;
+
+            const tabIndex = tabs.findIndex(
+              (tab) => (tab.type === "file" || tab.type === "diagram") && tab.path === sourcePath
+            );
+            if (tabIndex !== -1) {
+              const targetTab = tabs[tabIndex];
+              const newFileName =
+                targetTab?.type === "diagram"
+                  ? getDiagramDisplayName(newPath)
+                  : newPath.split(/[/\\]/).pop() || t.common.untitled;
+              const updatedTabs = tabs.map((tab, index) => {
+                if (index === tabIndex) {
+                  return {
+                    ...tab,
+                    path: newPath,
+                    name: newFileName,
+                    id: newPath,
+                  };
+                }
+                return tab;
+              });
+
+              set({
+                tabs: updatedTabs,
+                currentFile: currentFile === sourcePath ? newPath : currentFile,
+              });
+            }
+
+            useFavoriteStore.getState().updatePath(sourcePath, newPath);
+            return;
+          }
+
+          // Import moveFile dynamically to avoid circular dependency
+          const { moveFile } = await import("@/lib/tauri");
+          const newPath = await moveFile(sourcePath, targetFolder);
+          useFavoriteStore.getState().updatePath(sourcePath, newPath);
+          
+          // Update tab path if the moved file is open
+          const tabIndex = tabs.findIndex(
+            (t) => (t.type === "file" || t.type === "diagram") && t.path === sourcePath
+          );
+          if (tabIndex !== -1) {
+            const targetTab = tabs[tabIndex];
+            const newFileName =
+              targetTab?.type === "diagram"
+                ? getDiagramDisplayName(newPath)
+                : newPath.split(/[/\\]/).pop()?.replace(/\.(md|docx)$/i, "") || t.common.untitled;
+            const updatedTabs = tabs.map((tab, i) => {
+              if (i === tabIndex) {
+                return {
+                  ...tab,
+                  path: newPath,
+                  name: newFileName,
+                  id: newPath,
+                };
+              }
+              return tab;
+            });
+            
+            set({
+              tabs: updatedTabs,
+              currentFile: currentFile === sourcePath ? newPath : currentFile,
+            });
+          }
+          
+          // Refresh file tree
+          await refreshFileTree();
+          await refreshDatabaseRowsForPath(newPath);
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.moveFileToFolder",
+            action: "Move file",
+            error,
+            context: { sourcePath, targetFolder },
+          });
+          throw error;
+        }
+      },
+
+      // Move folder to a target folder
+      moveFolderToFolder: async (sourcePath: string, targetFolder: string) => {
+        const t = getCurrentTranslations();
+        const { tabs, currentFile, refreshFileTree } = get();
+        
+        try {
+          // Import moveFolder dynamically to avoid circular dependency
+          const { moveFolder } = await import("@/lib/tauri");
+          const newPath = await moveFolder(sourcePath, targetFolder);
+          useFavoriteStore.getState().updatePathsForFolderMove(sourcePath, newPath);
+          
+          // Normalize paths for comparison
+          const normalize = (p: string) => p.replace(/\\/g, "/");
+          const normalizedSource = normalize(sourcePath);
+          const normalizedNew = normalize(newPath);
+          
+          // Update all tabs that are inside the moved folder
+          const updatedTabs = tabs.map(tab => {
+            if (tab.type === "file" || tab.type === "diagram") {
+              const normalizedTabPath = normalize(tab.path);
+              if (normalizedTabPath.startsWith(normalizedSource + "/") || normalizedTabPath === normalizedSource) {
+                // Replace the old folder path with the new one
+                const relativePath = normalizedTabPath.slice(normalizedSource.length);
+                const newTabPath = normalizedNew + relativePath;
+                const newFileName =
+                  tab.type === "diagram"
+                    ? getDiagramDisplayName(newTabPath)
+                    : newTabPath.split(/[/\\]/).pop()?.replace(/\.(md|docx)$/i, "") || t.common.untitled;
+                return {
+                  ...tab,
+                  path: newTabPath,
+                  name: newFileName,
+                  id: newTabPath,
+                };
+              }
+            }
+            return tab;
+          });
+          
+          // Update currentFile if it was inside the moved folder
+          let newCurrentFile = currentFile;
+          if (currentFile) {
+            const normalizedCurrent = normalize(currentFile);
+            if (normalizedCurrent.startsWith(normalizedSource + "/") || normalizedCurrent === normalizedSource) {
+              const relativePath = normalizedCurrent.slice(normalizedSource.length);
+              newCurrentFile = normalizedNew + relativePath;
+            }
+          }
+          
+          set({
+            tabs: updatedTabs,
+            currentFile: newCurrentFile,
+          });
+          
+          // Refresh file tree
+          await refreshFileTree();
+          await refreshAllLoadedDatabases();
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.moveFolderToFolder",
+            action: "Move folder",
+            error,
+            context: { sourcePath, targetFolder },
+          });
+          throw error;
+        }
+      },
+    }),
+    {
+      name: "mindflow-workspace",
+      partialize: (state) => ({
+        vaultPath: state.vaultPath,  // 只持久化工作空间路径
+        recentFiles: state.recentFiles, // 持久化最近文件列表
+      }),
+      onRehydrateStorage: () => async (state) => {
+        if (!state?.vaultPath) return;
+        try {
+          await syncWorkspaceAccessRoots(state.vaultPath);
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.rehydrate",
+            action: "Sync workspace access roots after restore",
+            error,
+            level: "warning",
+            context: { vaultPath: state.vaultPath },
+          });
+        }
+        try {
+          await state.refreshFileTree();
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.rehydrate",
+            action: "Refresh file tree after restore",
+            error,
+            level: "warning",
+            context: { vaultPath: state.vaultPath },
+          });
+        }
+        try {
+          await state.syncMobileWorkspace({ path: state.vaultPath, force: true });
+        } catch (error) {
+          reportOperationError({
+            source: "FileStore.rehydrate",
+            action: "Sync mobile workspace after restore",
+            error,
+            level: "warning",
+            context: { vaultPath: state.vaultPath },
+          });
+        }
+      },
+    }
+  )
+);

@@ -1,0 +1,997 @@
+import { useEffect, useCallback, useState, useRef } from "react";
+import { useShallow } from "zustand/react/shallow";
+import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
+import { Sidebar } from "@/components/layout/Sidebar";
+import { RightPanel } from "@/components/layout/RightPanel";
+import { ResizeHandle } from "@/components/toolbar/ResizeHandle";
+import { Ribbon } from "@/components/layout/Ribbon";
+import { KnowledgeGraph } from "@/components/effects/KnowledgeGraph";
+import { Editor } from "@/editor/Editor";
+import { SplitEditor } from "@/components/layout/SplitEditor";
+import { useFileStore } from "@/stores/useFileStore";
+import { useUIStore } from "@/stores/useUIStore";
+import { useNoteIndexStore } from "@/stores/useNoteIndexStore";
+import { useRAGStore } from "@/stores/useRAGStore";
+import { PanelRight } from "lucide-react";
+import { CommandPalette, PaletteMode } from "@/components/search/CommandPalette";
+import { GlobalSearch } from "@/components/search/GlobalSearch";
+import { TabBar } from "@/components/layout/TabBar";
+import { DiffView } from "@/components/effects/DiffView";
+import { AIFloatingBall } from "@/components/ai/AIFloatingBall";
+import { SkillManagerModal } from "@/components/ai/SkillManagerModal";
+import { useAIStore } from "@/stores/useAIStore";
+import { initRustAgentListeners } from "@/stores/useRustAgentStore";
+import { useLocaleStore } from "@/stores/useLocaleStore";
+import { getDragData, clearDragData } from "@/lib/dragState";
+import { saveFile, startFileWatcher } from "@/lib/tauri";
+import { TitleBar } from "@/components/layout/TitleBar";
+import { useMacTopChromeEnabled } from "@/components/layout/MacTopChrome";
+import { MacLeftPaneTopBar } from "@/components/layout/MacLeftPaneTopBar";
+import { enableDebugLogger, disableDebugLogger } from "@/lib/debugLogger";
+import { AgentEvalPanel } from "@/tests/agent-eval/AgentEvalPanel";
+import { CodexVscodeHostPanel } from "@/components/debug/CodexVscodeHostPanel";
+import { CodexPanelHost } from "@/components/codex/CodexPanelHost";
+import { WelcomeScreen } from "@/components/onboarding/WelcomeScreen";
+import { OverviewDashboard } from "@/components/overview/OverviewDashboard";
+import { DevProfiler } from "@/perf/DevProfiler";
+import type { FsChangePayload } from "@/lib/fsChange";
+import { useOpenClawWorkspaceStore } from "@/stores/useOpenClawWorkspaceStore";
+import { ErrorNotifications } from "@/components/layout/ErrorNotifications";
+import { reportOperationError, reportUnhandledError } from "@/lib/reportError";
+import { initAutoUpdateCheck, initResumableUpdateListeners, useUpdateStore } from "@/stores/useUpdateStore";
+import { isTauriAvailable } from "@/lib/tauri";
+import { hydrateProxyConfigOnStartup } from "@/lib/proxyStartup";
+
+// Debug logging is enabled via a runtime toggle (or always in dev).
+
+// Component that shows tabs + graph/editor content
+function EditorWithGraph() {
+  const { tabs, activeTabIndex } = useFileStore(
+    useShallow((state) => ({
+      tabs: state.tabs,
+      activeTabIndex: state.activeTabIndex,
+    }))
+  );
+  const activeTab = activeTabIndex >= 0 ? tabs[activeTabIndex] : null;
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden bg-background transition-colors duration-300">
+      <TabBar />
+      {activeTab?.type === "graph" ? (
+        <KnowledgeGraph className="flex-1" />
+      ) : activeTab?.type === "isolated-graph" && activeTab.isolatedNode ? (
+        <KnowledgeGraph className="flex-1" isolatedNode={activeTab.isolatedNode} />
+      ) : (
+        <OverviewDashboard />
+      )}
+    </div>
+  );
+}
+
+// Component that shows diff view
+function DiffViewWrapper() {
+  const { t } = useLocaleStore();
+  const { pendingDiff, setPendingDiff, clearPendingEdits, diffResolver } = useAIStore();
+  const openFile = useFileStore((state) => state.openFile);
+
+  const handleAccept = useCallback(async () => {
+    if (!pendingDiff) return;
+
+    try {
+      // Save to file first
+      await saveFile(pendingDiff.filePath, pendingDiff.modified);
+
+      // Clear the diff and pending edits
+      clearPendingEdits();
+
+      // Refresh the file in editor (forceReload = true)
+      await openFile(pendingDiff.filePath, { addToHistory: false, forceReload: true });
+
+      console.log(`✅ 已应用修改到 ${pendingDiff.fileName}`);
+
+      // Resolve promise if exists
+      if (diffResolver) {
+        diffResolver(true);
+      }
+    } catch (error) {
+      reportOperationError({
+        source: "App.DiffViewWrapper.handleAccept",
+        action: "Apply AI edit diff",
+        error,
+        userMessage: t.ai.applyEditFailed,
+        context: { filePath: pendingDiff.filePath },
+      });
+    }
+  }, [pendingDiff, clearPendingEdits, openFile, diffResolver, t]);
+
+  const handleReject = useCallback(() => {
+    setPendingDiff(null);
+    // Also clear pending edits so AI doesn't get confused
+    clearPendingEdits();
+
+    // Resolve promise if exists
+    if (diffResolver) {
+      diffResolver(false);
+    }
+  }, [setPendingDiff, clearPendingEdits, diffResolver]);
+
+  if (!pendingDiff) return null;
+
+  return (
+    <DiffView
+      fileName={pendingDiff.fileName}
+      original={pendingDiff.original}
+      modified={pendingDiff.modified}
+      description={pendingDiff.description}
+      onAccept={handleAccept}
+      onReject={handleReject}
+    />
+  );
+}
+
+function MobileWorkspaceToast() {
+  const mobileWorkspaceSync = useFileStore((state) => state.mobileWorkspaceSync);
+  const [message, setMessage] = useState<string | null>(null);
+  const [visible, setVisible] = useState(false);
+  const hideTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (mobileWorkspaceSync.status !== "error" || !mobileWorkspaceSync.error) {
+      return;
+    }
+    const pathLabel = mobileWorkspaceSync.path ? ` (${mobileWorkspaceSync.path})` : "";
+    const nextMessage = `Workspace sync failed${pathLabel}: ${mobileWorkspaceSync.error}`;
+    setMessage(nextMessage);
+    setVisible(true);
+    if (hideTimerRef.current) {
+      window.clearTimeout(hideTimerRef.current);
+    }
+    hideTimerRef.current = window.setTimeout(() => {
+      setVisible(false);
+    }, 6000);
+    return () => {
+      if (hideTimerRef.current) {
+        window.clearTimeout(hideTimerRef.current);
+      }
+    };
+  }, [
+    mobileWorkspaceSync.status,
+    mobileWorkspaceSync.error,
+    mobileWorkspaceSync.path,
+    mobileWorkspaceSync.lastInvokeAt,
+  ]);
+
+  if (!visible || !message) {
+    return null;
+  }
+
+  return (
+    <div className="fixed bottom-4 right-4 z-[200] max-w-sm rounded-lg border border-red-500/30 bg-background/90 px-3 py-2 text-xs text-red-500 shadow-lg">
+      {message}
+    </div>
+  );
+}
+
+interface GlobalSearchRequest {
+  query?: string;
+  pathPrefixes?: string[];
+  scopeLabel?: string;
+}
+
+const watchedPaths = new Set<string>();
+
+function App() {
+  const {
+    vaultPath,
+    setVaultPath,
+    currentFile,
+    save,
+    createNewFile,
+    tabs,
+    activeTabIndex,
+    fileTree,
+    refreshFileTree,
+    openAIMainTab,
+    syncMobileWorkspace,
+  } = useFileStore(
+    useShallow((state) => ({
+      vaultPath: state.vaultPath,
+      setVaultPath: state.setVaultPath,
+      currentFile: state.currentFile,
+      save: state.save,
+      createNewFile: state.createNewFile,
+      tabs: state.tabs,
+      activeTabIndex: state.activeTabIndex,
+      fileTree: state.fileTree,
+      refreshFileTree: state.refreshFileTree,
+      openAIMainTab: state.openAIMainTab,
+      syncMobileWorkspace: state.syncMobileWorkspace,
+    }))
+  );
+  const pendingDiff = useAIStore((state) => state.pendingDiff);
+  const buildIndex = useNoteIndexStore((state) => state.buildIndex);
+  const { initialize: initializeRAG, config: ragConfig } = useRAGStore(
+    useShallow((state) => ({
+      initialize: state.initialize,
+      config: state.config,
+    }))
+  );
+  const t = useLocaleStore((state) => state.t);
+  const setCurrentUpdateVersion = useUpdateStore((state) => state.setCurrentVersion);
+  const mountedOpenClawWorkspacePath = useOpenClawWorkspaceStore((state) =>
+    state.getMountedWorkspacePath(vaultPath),
+  );
+
+  // Get active tab
+  const activeTab = activeTabIndex >= 0 ? tabs[activeTabIndex] : null;
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteMode, setPaletteMode] = useState<PaletteMode>("command");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchRequest, setSearchRequest] = useState<GlobalSearchRequest | null>(null);
+  const [isLoadingVault, setIsLoadingVault] = useState(false);
+  const [evalPanelOpen, setEvalPanelOpen] = useState(false);
+  const [codexPanelOpen, setCodexPanelOpen] = useState(false);
+  const [welcomePreview, setWelcomePreview] = useState(false);
+  const welcomeTapRef = useRef<{ count: number; timer: ReturnType<typeof setTimeout> | null }>({ count: 0, timer: null });
+
+  // 首次启动时默认打开 AI Chat
+  useEffect(() => {
+    if (tabs.length === 0) {
+      openAIMainTab();
+    }
+  }, []);
+
+  // 初始化 Rust Agent 监听（用于移动端会话指令）
+  useEffect(() => {
+    initRustAgentListeners();
+  }, []);
+
+  // 启动时自动检查更新（延迟 5 秒，避免影响启动性能）
+  useEffect(() => {
+    initAutoUpdateCheck(5000);
+    void initResumableUpdateListeners();
+  }, []);
+
+  // Hydrate the Rust-side proxy state from persisted UI settings before delayed update checks run.
+  useEffect(() => {
+    void hydrateProxyConfigOnStartup(useUIStore.getState()).catch((err) => {
+      console.warn("[Proxy] Failed to hydrate proxy config on startup:", err);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriAvailable()) {
+      setCurrentUpdateVersion(null);
+      return;
+    }
+
+    getVersion()
+      .then((version) => setCurrentUpdateVersion(version))
+      .catch(() => setCurrentUpdateVersion(null));
+  }, [setCurrentUpdateVersion]);
+
+  // 启动时自动加载保存的工作空间
+  useEffect(() => {
+    if (vaultPath && fileTree.length === 0 && !isLoadingVault) {
+      setIsLoadingVault(true);
+      refreshFileTree().finally(() => setIsLoadingVault(false));
+    }
+  }, []);
+
+  // 兼容兜底：确保移动端网关拿到当前 workspace
+  useEffect(() => {
+    if (!vaultPath) return;
+    syncMobileWorkspace({ path: vaultPath, force: true });
+  }, [vaultPath, syncMobileWorkspace]);
+
+  // 启动文件监听器，自动刷新文件树
+  useEffect(() => {
+    if (!vaultPath) return;
+
+    let unlisten: (() => void) | null = null;
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const setupWatcher = async () => {
+      try {
+        const { getFsChangePath, handleFsChangeEvent } = await import("@/lib/fsChange");
+        const { reloadFileIfOpen } = useFileStore.getState();
+        const { reloadSecondaryIfOpen } = (await import("@/stores/useSplitStore")).useSplitStore.getState();
+
+        // 启动后端文件监听（去重，避免重复创建 watcher 线程）
+        await startFileWatcher(vaultPath);
+        if (mountedOpenClawWorkspacePath && mountedOpenClawWorkspacePath !== vaultPath && !watchedPaths.has(mountedOpenClawWorkspacePath)) {
+          watchedPaths.add(mountedOpenClawWorkspacePath);
+          await startFileWatcher(mountedOpenClawWorkspacePath);
+        }
+        console.log("[FileWatcher] Started watching:", vaultPath);
+
+        // 监听文件变化事件（带防抖）
+        unlisten = await listen<FsChangePayload | null>("fs:change", (event) => {
+          if (import.meta.env.DEV) {
+            console.log("[FileWatcher] File changed:", event.payload);
+          }
+
+          // 防抖：500ms 内多次变化只刷新一次
+          if (debounceTimer) clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(() => {
+            const changedPath = getFsChangePath(event.payload);
+            if (changedPath) {
+              const fileStore = useFileStore.getState();
+              const dirtyPaths = fileStore.tabs
+                .filter((tab) => tab.type === "file" && tab.isDirty)
+                .map((tab) => tab.path);
+              if (fileStore.currentFile && fileStore.isDirty) {
+                dirtyPaths.push(fileStore.currentFile);
+              }
+              const normalize = (path: string) => path.replace(/\\/g, "/");
+              const vaultPrefix = `${normalize(vaultPath).replace(/\/+$/, "")}/`;
+              const mountedPrefix = mountedOpenClawWorkspacePath
+                ? `${normalize(mountedOpenClawWorkspacePath).replace(/\/+$/, "")}/`
+                : null;
+              const normalizedChangedPath = normalize(changedPath);
+              useOpenClawWorkspaceStore.getState().recordExternalChange(
+                vaultPath,
+                [changedPath],
+                dirtyPaths,
+              );
+              if (
+                mountedPrefix &&
+                normalizedChangedPath.startsWith(mountedPrefix) &&
+                mountedOpenClawWorkspacePath !== vaultPath
+              ) {
+                void useOpenClawWorkspaceStore
+                  .getState()
+                  .refreshMountedFileTree(
+                    vaultPath,
+                    mountedOpenClawWorkspacePath ?? undefined,
+                  )
+                  .then((tree) =>
+                    useOpenClawWorkspaceStore
+                      .getState()
+                      .refreshAttachmentScan(
+                        vaultPath,
+                        tree,
+                        mountedOpenClawWorkspacePath ?? undefined,
+                      ),
+                  );
+              }
+              if (!normalizedChangedPath.startsWith(vaultPrefix)) {
+                handleFsChangeEvent(event.payload, (path) => {
+                  reloadFileIfOpen(path, { skipIfDirty: true });
+                  reloadSecondaryIfOpen(path, { skipIfDirty: true });
+                });
+                return;
+              }
+            }
+            refreshFileTree();
+            handleFsChangeEvent(event.payload, (path) => {
+              reloadFileIfOpen(path, { skipIfDirty: true });
+              reloadSecondaryIfOpen(path, { skipIfDirty: true });
+            });
+          }, 500);
+        });
+      } catch (error) {
+        reportOperationError({
+          source: "App.setupWatcher",
+          action: "Start filesystem watcher",
+          error,
+          level: "warning",
+          context: { vaultPath },
+        });
+      }
+    };
+
+    setupWatcher();
+
+    return () => {
+      if (unlisten) unlisten();
+      if (debounceTimer) clearTimeout(debounceTimer);
+    };
+  }, [vaultPath, mountedOpenClawWorkspacePath, refreshFileTree]);
+
+  const {
+    leftSidebarOpen,
+    rightSidebarOpen,
+    leftSidebarWidth,
+    rightSidebarWidth,
+    setLeftSidebarOpen,
+    setLeftSidebarWidth,
+    setRightSidebarOpen,
+    setRightSidebarWidth,
+    toggleLeftSidebar,
+    toggleRightSidebar,
+    splitView,
+    isSkillManagerOpen,
+    setSkillManagerOpen,
+    diagnosticsEnabled,
+  } = useUIStore(
+    useShallow((state) => ({
+      leftSidebarOpen: state.leftSidebarOpen,
+      rightSidebarOpen: state.rightSidebarOpen,
+      leftSidebarWidth: state.leftSidebarWidth,
+      rightSidebarWidth: state.rightSidebarWidth,
+      setLeftSidebarOpen: state.setLeftSidebarOpen,
+      setLeftSidebarWidth: state.setLeftSidebarWidth,
+      setRightSidebarOpen: state.setRightSidebarOpen,
+      setRightSidebarWidth: state.setRightSidebarWidth,
+      toggleLeftSidebar: state.toggleLeftSidebar,
+      toggleRightSidebar: state.toggleRightSidebar,
+      splitView: state.splitView,
+      isSkillManagerOpen: state.isSkillManagerOpen,
+      setSkillManagerOpen: state.setSkillManagerOpen,
+      diagnosticsEnabled: state.diagnosticsEnabled,
+    }))
+  );
+  const showMacTopChrome = useMacTopChromeEnabled();
+  const showMacLeftPaneTopBar = showMacTopChrome && leftSidebarOpen;
+  const showMacRibbonTrafficLightSafeArea = showMacTopChrome && !showMacLeftPaneTopBar;
+  const diagnosticsActive = diagnosticsEnabled || import.meta.env.DEV;
+
+  // Diagnostics logging (runtime toggle)
+  useEffect(() => {
+    if (diagnosticsActive) {
+      enableDebugLogger();
+    } else {
+      disableDebugLogger();
+    }
+  }, [diagnosticsActive]);
+
+  // Attach crash handlers only when diagnostics are enabled.
+  useEffect(() => {
+    if (!diagnosticsActive) return;
+    const onError = (event: ErrorEvent) => {
+      console.error(
+        "[WindowError]",
+        event.message,
+        event.filename,
+        event.lineno,
+        event.colno
+      );
+      if (event.error) {
+        console.error("[WindowErrorStack]", event.error.stack || event.error);
+      }
+    };
+    const onUnhandled = (event: PromiseRejectionEvent) => {
+      const reason =
+        (event.reason && ((event.reason as any).stack || event.reason)) ||
+        "unknown";
+      console.error("[UnhandledRejection]", reason);
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onUnhandled);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    };
+  }, [diagnosticsActive]);
+
+  // Always surface unhandled runtime errors to users so they can report actionable issues.
+  useEffect(() => {
+    const onError = (event: ErrorEvent) => {
+      reportUnhandledError("window.error", event.error ?? event.message, {
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+      });
+    };
+    const onUnhandled = (event: PromiseRejectionEvent) => {
+      reportUnhandledError("window.unhandledrejection", event.reason);
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onUnhandled);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    };
+  }, []);
+
+  // Build note index when file tree changes
+  useEffect(() => {
+    if (fileTree.length > 0) {
+      buildIndex(fileTree);
+    }
+  }, [fileTree, buildIndex]);
+
+  // Initialize RAG system when vault is opened (if enabled and configured)
+  useEffect(() => {
+    if (vaultPath && ragConfig.enabled && ragConfig.embeddingApiKey) {
+      initializeRAG(vaultPath).catch((error) => {
+        reportOperationError({
+          source: "App.initializeRAG",
+          action: "Initialize RAG index",
+          error,
+          level: "warning",
+          context: { vaultPath },
+        });
+      });
+    }
+  }, [vaultPath, ragConfig.enabled, ragConfig.embeddingApiKey, initializeRAG]);
+
+  // 全局鼠标拖拽处理：模拟从文件树拖拽文件创建双链
+  useEffect(() => {
+    let dragIndicator: HTMLDivElement | null = null;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const dragData = getDragData();
+      if (!dragData) return;
+
+      // 检测是否开始拖拽（移动超过 5px）
+      const dx = e.clientX - dragData.startX;
+      const dy = e.clientY - dragData.startY;
+
+      if (!dragData.isDragging && Math.sqrt(dx * dx + dy * dy) > 5) {
+        dragData.isDragging = true;
+
+        // 创建拖拽指示器 - VS Code/Cursor 风格
+        dragIndicator = document.createElement('div');
+        dragIndicator.className = 'fixed pointer-events-none z-[9999] flex items-center gap-2 px-3 py-2 bg-popover/95 backdrop-blur-sm text-popover-foreground text-sm rounded-lg border border-border shadow-xl';
+
+        // 根据是文件还是文件夹显示不同图标
+        const icon = dragData.isFolder
+          ? `<svg class="w-4 h-4 text-yellow-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>`
+          : `<svg class="w-4 h-4 text-blue-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+              <polyline points="14 2 14 8 20 8"/>
+            </svg>`;
+
+        dragIndicator.innerHTML = `
+          ${icon}
+          <span class="truncate max-w-[200px]">${dragData.fileName.replace(/\.(md|db\.json)$/i, '')}</span>
+        `;
+        document.body.appendChild(dragIndicator);
+      }
+
+      if (dragData.isDragging && dragIndicator) {
+        dragIndicator.style.left = `${e.clientX - 8}px`;
+        dragIndicator.style.top = `${e.clientY + 2}px`;
+      }
+    };
+
+    const handleMouseUp = (e: MouseEvent) => {
+      const dragData = getDragData();
+      if (!dragData) return;
+
+      // 清理拖拽指示器
+      if (dragIndicator) {
+        dragIndicator.remove();
+        dragIndicator = null;
+      }
+
+      if (dragData.isDragging) {
+        // 检查是否放置在文件夹上
+        const folderTarget = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-folder-path]');
+        if (folderTarget) {
+          const targetPath = folderTarget.getAttribute('data-folder-path');
+          if (targetPath && targetPath !== dragData.filePath) {
+            // 触发文件夹放置事件
+            const folderDropEvent = new CustomEvent('mindflow-folder-drop', {
+              detail: {
+                sourcePath: dragData.filePath,
+                targetFolder: targetPath,
+                isFolder: dragData.isFolder,
+              }
+            });
+            window.dispatchEvent(folderDropEvent);
+            // 清理全局数据
+            clearDragData();
+            return;
+          }
+        }
+
+        // 文件夹不能插入链接，只触发文件的 mindflow-drop
+        if (!dragData.isFolder) {
+          // 触发自定义事件，让编辑器和 AI 对话框处理
+          const dropEvent = new CustomEvent('mindflow-drop', {
+            detail: {
+              wikiLink: dragData.wikiLink,
+              filePath: dragData.filePath,
+              fileName: dragData.fileName,
+              x: e.clientX,
+              y: e.clientY,
+            }
+          });
+          window.dispatchEvent(dropEvent);
+        }
+      }
+
+      // 清理全局数据
+      clearDragData();
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      if (dragIndicator) dragIndicator.remove();
+    };
+  }, []);
+
+  // Handle keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isCtrl = e.ctrlKey || e.metaKey;
+
+      // Ctrl+S: Save
+      if (isCtrl && e.key === "s") {
+        e.preventDefault();
+        save();
+        return;
+      }
+
+      // Ctrl+P: Command palette
+      if (isCtrl && e.key === "p") {
+        e.preventDefault();
+        setPaletteMode("command");
+        setPaletteOpen(true);
+        return;
+      }
+
+      // Ctrl+O: Quick open file
+      if (isCtrl && e.key === "o") {
+        e.preventDefault();
+        setPaletteMode("file");
+        setPaletteOpen(true);
+        return;
+      }
+
+      // Ctrl+N: New file
+      if (isCtrl && e.key === "n") {
+        e.preventDefault();
+        if (vaultPath) {
+          createNewFile();
+        }
+        return;
+      }
+
+      // Ctrl+Shift+F: Global search
+      if (isCtrl && e.shiftKey && e.key === "F") {
+        e.preventDefault();
+        setSearchRequest(null);
+        setSearchOpen(true);
+        return;
+      }
+
+      // Ctrl+Shift+E: Agent Eval Panel (Dev only)
+      if (import.meta.env.DEV && isCtrl && e.shiftKey && e.key === "E") {
+        e.preventDefault();
+        setEvalPanelOpen(true);
+        return;
+      }
+
+      // Ctrl+Shift+C: Codex VS Code extension host (Dev only)
+      if (import.meta.env.DEV && isCtrl && e.shiftKey && e.key === "C") {
+        e.preventDefault();
+        setCodexPanelOpen(true);
+        return;
+      }
+
+      // Esc: Close eval panel
+      if (e.key === "Escape" && evalPanelOpen) {
+        e.preventDefault();
+        setEvalPanelOpen(false);
+        return;
+      }
+
+      // Esc: Close codex panel
+      if (e.key === "Escape" && codexPanelOpen) {
+        e.preventDefault();
+        setCodexPanelOpen(false);
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [save, vaultPath, createNewFile, evalPanelOpen, codexPanelOpen]);
+
+  // Open folder dialog
+  const handleOpenVault = useCallback(async () => {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: t.welcome.openFolder,
+    });
+
+    if (selected && typeof selected === "string") {
+      setVaultPath(selected);
+    }
+  }, [setVaultPath]);
+
+  // Listen for window-level entry actions dispatched from top-level chrome
+  useEffect(() => {
+    const onOpenVault = () => handleOpenVault();
+    const onOpenSearch = (event: Event) => {
+      const customEvent = event as CustomEvent<GlobalSearchRequest | undefined>;
+      setSearchRequest(customEvent.detail ?? null);
+      setSearchOpen(true);
+    };
+    const onOpenCommandPalette = () => setPaletteOpen(true);
+    window.addEventListener("open-vault", onOpenVault);
+    window.addEventListener("open-global-search", onOpenSearch);
+    window.addEventListener("open-command-palette", onOpenCommandPalette);
+    return () => {
+      window.removeEventListener("open-vault", onOpenVault);
+      window.removeEventListener("open-global-search", onOpenSearch);
+      window.removeEventListener("open-command-palette", onOpenCommandPalette);
+    };
+  }, [handleOpenVault, setPaletteOpen, setSearchOpen]);
+
+  // Handle resize - must be before conditional returns
+  // VS Code 风格：拖动可以折叠/展开面板
+  const LEFT_MIN_WIDTH = 200;  // store 中的最小值
+  const RIGHT_MIN_WIDTH = 280; // store 中的最小值
+  const MAIN_MIN_WIDTH = 480;
+
+  const layoutRef = useRef<HTMLDivElement>(null);
+  const ribbonRef = useRef<HTMLDivElement>(null);
+
+  // 累计拖拽距离（用于折叠状态下展开）
+  const dragAccumulatorRef = useRef(0);
+
+  const handleLeftResize = useCallback(
+    (delta: number) => {
+      if (!leftSidebarOpen) {
+        // 面板已折叠：累计向右拖拽距离
+        dragAccumulatorRef.current += delta;
+        if (dragAccumulatorRef.current > 50) {
+          // 累计拖动超过 50px，打开面板并设置宽度
+          const newWidth = Math.max(LEFT_MIN_WIDTH, dragAccumulatorRef.current);
+          setLeftSidebarOpen(true);
+          setLeftSidebarWidth(newWidth);
+          dragAccumulatorRef.current = 0;
+        }
+      } else {
+        // 面板已打开：调整宽度或折叠
+        dragAccumulatorRef.current = 0; // 重置累计器
+        if (leftSidebarWidth <= LEFT_MIN_WIDTH && delta < 0) {
+          setLeftSidebarOpen(false);
+        } else {
+          setLeftSidebarWidth(leftSidebarWidth + delta);
+        }
+      }
+    },
+    [leftSidebarOpen, leftSidebarWidth, setLeftSidebarOpen, setLeftSidebarWidth]
+  );
+
+  const handleRightResize = useCallback(
+    (delta: number) => {
+      const newWidth = rightSidebarWidth + delta;
+      // 当已经是最小宽度且继续向内拖时，折叠面板
+      if (rightSidebarWidth <= RIGHT_MIN_WIDTH && delta < 0) {
+        toggleRightSidebar();
+      } else {
+        setRightSidebarWidth(newWidth);
+      }
+    },
+    [rightSidebarWidth, setRightSidebarWidth, toggleRightSidebar]
+  );
+
+  const getAvailableMainWidth = useCallback(() => {
+    const totalWidth = layoutRef.current?.getBoundingClientRect().width ?? window.innerWidth;
+    const ribbonWidth = ribbonRef.current?.getBoundingClientRect().width ?? 0;
+    const leftWidth = leftSidebarOpen ? leftSidebarWidth : 0;
+    return totalWidth - ribbonWidth - leftWidth;
+  }, [leftSidebarOpen, leftSidebarWidth]);
+
+  useEffect(() => {
+    const protectMainContentWidth = () => {
+      if (!rightSidebarOpen) return;
+
+      const availableWidth = getAvailableMainWidth();
+      const maxRightSidebarWidth = availableWidth - MAIN_MIN_WIDTH;
+
+      if (maxRightSidebarWidth < RIGHT_MIN_WIDTH) {
+        setRightSidebarOpen(false);
+        return;
+      }
+
+      if (rightSidebarWidth > maxRightSidebarWidth) {
+        setRightSidebarWidth(maxRightSidebarWidth);
+      }
+    };
+
+    protectMainContentWidth();
+    window.addEventListener("resize", protectMainContentWidth);
+    return () => window.removeEventListener("resize", protectMainContentWidth);
+  }, [
+    getAvailableMainWidth,
+    rightSidebarOpen,
+    rightSidebarWidth,
+    setRightSidebarOpen,
+    setRightSidebarWidth,
+  ]);
+
+  // Welcome screen when no vault is open
+  if (!vaultPath) {
+    return <WelcomeScreen onOpenVault={handleOpenVault} />;
+  }
+
+  return (
+    <div className="h-full flex flex-col bg-background ui-app-bg">
+      <TitleBar />
+      <div ref={layoutRef} className="flex-1 flex overflow-hidden transition-colors duration-300">
+        <div className="flex min-h-0 flex-shrink-0 flex-col">
+          {showMacLeftPaneTopBar ? <MacLeftPaneTopBar /> : null}
+
+          <div className="flex min-h-0 flex-1">
+            {/* Left Ribbon (Icon Bar) */}
+            <div ref={ribbonRef} className="flex-shrink-0">
+              <Ribbon
+                showMacTrafficLightSafeArea={showMacRibbonTrafficLightSafeArea}
+                flushTopSpacing={showMacLeftPaneTopBar}
+              />
+            </div>
+
+            {/* Left Sidebar (File Tree) */}
+            <div
+              className={`flex-shrink-0 transition-all duration-300 ease-out overflow-hidden ${leftSidebarOpen ? "opacity-100" : "w-0 opacity-0"
+                }`}
+              style={{ width: leftSidebarOpen ? leftSidebarWidth : 0 }}
+            >
+              <DevProfiler id="Sidebar">
+                <Sidebar />
+              </DevProfiler>
+            </div>
+          </div>
+        </div>
+
+        {/* Left Resize Handle - VS Code 风格，始终显示，可拖拽展开/折叠 */}
+        <div className="relative flex-shrink-0 h-full z-20 before:absolute before:inset-x-0 before:top-0 before:h-11 before:border-b before:border-border/60 before:pointer-events-none">
+          <ResizeHandle
+            direction="left"
+            onResize={handleLeftResize}
+            onDoubleClick={toggleLeftSidebar}
+          />
+        </div>
+
+        {/* Main content - switches between Editor, Graph, Split, Diff, VideoNote and AI Chat based on state */}
+        <main
+          className="relative flex flex-1 flex-col overflow-hidden min-w-0 bg-background transition-[width,opacity] duration-200"
+        >
+          {pendingDiff && activeTab?.type !== "ai-chat" ? (
+            // Show diff view when there's a pending AI edit (non chat context)
+            <DiffViewWrapper />
+          ) : activeTab?.type === "ai-chat" ? (
+            // 主视图区 AI 聊天标签页，交给 Editor 内部根据 tab 类型渲染
+            <Editor />
+          ) : splitView && currentFile ? (
+            // Show split editor when enabled
+            <SplitEditor />
+          ) : activeTab?.type === "graph" || activeTab?.type === "isolated-graph" ? (
+            // 图谱标签页
+            <EditorWithGraph />
+          ) : currentFile ? (
+            // 文件编辑
+            <Editor />
+          ) : (
+            // 空状态或其他标签页类型 - 统一使用 EditorWithGraph 保持 TabBar 一致
+            <EditorWithGraph />
+          )}
+        </main>
+
+        {/* Right Resize Handle + Collapse Button */}
+        <div className="relative flex-shrink-0 h-full z-20 before:absolute before:inset-x-0 before:top-0 before:h-11 before:border-b before:border-border/60 before:pointer-events-none">
+          {rightSidebarOpen && (
+            <ResizeHandle
+              direction="right"
+              onResize={handleRightResize}
+              onDoubleClick={toggleRightSidebar}
+            />
+          )}
+          {/* Right Collapse Button - 只在面板收起时显示 */}
+          {!rightSidebarOpen && (
+            <button
+              onClick={toggleRightSidebar}
+              className="absolute top-1/2 -translate-y-1/2 z-10 right-1 w-7 h-7 bg-background/55 backdrop-blur-md border border-border/60 shadow-ui-card ui-icon-btn"
+              title={t.layout.expandRightPanel}
+            >
+              <PanelRight className="w-4 h-4 text-muted-foreground" />
+            </button>
+          )}
+        </div>
+
+        {/* Right Sidebar */}
+        <div
+          className={`flex-shrink-0 transition-all duration-300 ease-out overflow-hidden ${
+            rightSidebarOpen ? "opacity-100" : "w-0 opacity-0"
+          }`}
+          style={{ width: rightSidebarOpen ? rightSidebarWidth : 0 }}
+        >
+          <DevProfiler id="RightPanel">
+            <RightPanel />
+          </DevProfiler>
+        </div>
+      </div>
+
+      <CodexPanelHost />
+
+      {/* Command Palette */}
+      <CommandPalette
+        isOpen={paletteOpen}
+        mode={paletteMode}
+        onClose={() => setPaletteOpen(false)}
+        onModeChange={setPaletteMode}
+      />
+
+      {/* Global Search */}
+      <GlobalSearch
+        isOpen={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        request={searchRequest}
+      />
+
+      {/* Skill Manager */}
+      <SkillManagerModal
+        isOpen={isSkillManagerOpen}
+        onClose={() => setSkillManagerOpen(false)}
+      />
+
+      {/* AI Floating Ball */}
+      <AIFloatingBall />
+
+      {/* Agent Eval Panel (Dev only) */}
+      {import.meta.env.DEV && evalPanelOpen && (
+        <div className="fixed inset-0 z-[100] bg-background">
+          <div className="absolute top-2 right-2 z-10">
+            <button
+              onClick={() => setEvalPanelOpen(false)}
+              className="px-4 py-2 bg-muted rounded hover:bg-muted/80"
+            >
+              ✕ {t.common.close} (Esc)
+            </button>
+          </div>
+          <AgentEvalPanel />
+        </div>
+      )}
+
+      {/* Codex VS Code extension host panel (Dev only) */}
+      {import.meta.env.DEV && codexPanelOpen && (
+        <div className="fixed inset-0 z-[100] bg-background">
+          <div className="hidden">
+            <button
+              onClick={() => setCodexPanelOpen(false)}
+              className="px-4 py-2 bg-muted rounded hover:bg-muted/80"
+            >
+              ✕ {t.common.close} (Esc)
+            </button>
+          </div>
+          <CodexVscodeHostPanel onClose={() => setCodexPanelOpen(false)} />
+        </div>
+      )}
+
+      {/* Hidden welcome preview: tap top-right corner 5 times to activate */}
+      {welcomePreview && (
+        <div className="fixed inset-0 z-[200]">
+          <WelcomeScreen onOpenVault={() => setWelcomePreview(false)} />
+        </div>
+      )}
+      <div
+        className="fixed top-0 right-0 w-4 h-4 z-[99]"
+        onClick={() => {
+          const ref = welcomeTapRef.current;
+          ref.count++;
+          if (ref.timer) clearTimeout(ref.timer);
+          if (ref.count >= 5) {
+            ref.count = 0;
+            setWelcomePreview(true);
+          } else {
+            ref.timer = setTimeout(() => { ref.count = 0; }, 2000);
+          }
+        }}
+      />
+
+      <ErrorNotifications />
+      <MobileWorkspaceToast />
+    </div>
+  );
+}
+
+export default App;

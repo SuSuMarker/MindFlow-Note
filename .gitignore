@@ -1,0 +1,86 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+dist-ssr/
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/ios/build/
+gradle-*/
+scripts/run-ios-sim.sh
+
+# Tauri build
+src-tauri/target/
+src-tauri/gen/
+src-tauri/build.log
+src-tauri/resources/node/node
+src-tauri/resources/node/node.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+third_party/
+thirdparty/
+
+# Cache
+.vite/
+*.cache
+.eslintcache
+
+# Server data
+server/data/
+server/target/
+
+# Test coverage
+coverage/
+
+# Temporary files
+tmp/
+
+# Typesetting baselines (generated)
+tests/typesetting/openoffice-baselines/
+tests/typesetting/lumina-baselines/
+tests/typesetting/compare-reports/
+tests/typesetting/perf/
+
+# Local config
+*.local
+mobile/android/local.properties
+third_party/
+
+# AI assistants
+CLAUDE.md
+.claude/
+.kiro/
+.codex/
+
+# Local Codex/skills scratch
+.tmp_codex_ext/
+skills/
+!src-tauri/resources/skills/
+!src-tauri/resources/skills/**
+tmp.txt
+.plan-loop/
+scripts/plan-loop*.ps1
+.tmp_node/
+.superset/
+.worktrees/
+
+# Local Playwright artifacts
+output/playwright/
+.playwright-mcp/

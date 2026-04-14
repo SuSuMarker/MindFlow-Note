@@ -1,0 +1,204 @@
+import { useMemo, useCallback, useEffect, useRef } from "react";
+import { parseMarkdown } from "@/services/markdown/markdown";
+import { useFileStore } from "@/stores/useFileStore";
+import { useLocaleStore } from "@/stores/useLocaleStore";
+import { parseMindFlowLink } from "@/services/pdf/annotations";
+import { readBinaryFileBase64 } from "@/lib/tauri";
+import { reportOperationError } from "@/lib/reportError";
+import { getImageMimeType, resolveEditorImagePath } from "@/services/assets/editorImages";
+import mermaid from "mermaid";
+import { useShallow } from "zustand/react/shallow";
+import { pluginRenderRuntime } from "@/services/plugins/renderRuntime";
+
+// 初始化 mermaid
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'default',
+  securityLevel: 'loose',
+  fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+});
+
+interface ReadingViewProps {
+  content: string;
+  className?: string;
+  filePath?: string | null;
+}
+
+export function ReadingView({ content, className = "", filePath = null }: ReadingViewProps) {
+  const { fileTree, openFile, vaultPath, currentFile } = useFileStore(
+    useShallow((state) => ({
+      fileTree: state.fileTree,
+      openFile: state.openFile,
+      vaultPath: state.vaultPath,
+      currentFile: state.currentFile,
+    }))
+  );
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const html = useMemo(() => {
+    return parseMarkdown(content);
+  }, [content]);
+
+  // 渲染 Mermaid 图表
+  useEffect(() => {
+    if (!containerRef.current) return;
+    
+    const mermaidElements = containerRef.current.querySelectorAll('.mermaid');
+    if (mermaidElements.length === 0) return;
+    
+    // 异步渲染 mermaid
+    const renderMermaid = async () => {
+      try {
+        // 重新初始化以支持主题切换
+        const isDark = document.documentElement.classList.contains('dark');
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: isDark ? 'dark' : 'default',
+          securityLevel: 'loose',
+          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        });
+        
+        await mermaid.run({
+          nodes: mermaidElements as NodeListOf<HTMLElement>,
+        });
+      } catch (err) {
+        console.error('[Mermaid] Render failed:', err);
+      }
+    };
+    
+    renderMermaid();
+  }, [html]);
+
+  // Plugin reading view post-processors (DOM lifecycle).
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const unmount = pluginRenderRuntime.mountReadingView(containerRef.current);
+    return () => unmount();
+  }, [html]);
+
+  // 转换本地图片路径为 base64 data URL
+  useEffect(() => {
+    if (!containerRef.current || !vaultPath) return;
+    
+    const images = containerRef.current.querySelectorAll('img');
+    images.forEach((imgEl) => {
+      const img = imgEl as HTMLImageElement;
+      const src = img.getAttribute('src');
+      if (src && !src.startsWith('http') && !src.startsWith('data:')) {
+        const fullPath = resolveEditorImagePath({
+          src,
+          notePath: filePath ?? currentFile,
+          vaultPath,
+        });
+        if (!fullPath) return;
+        
+        img.style.opacity = '0.5';
+        
+        readBinaryFileBase64(fullPath)
+          .then(base64 => {
+            img.src = `data:${getImageMimeType(fullPath)};base64,${base64}`;
+            img.style.opacity = '1';
+          })
+          .catch(err => {
+            console.error('[ReadingView] Image load failed:', fullPath, err);
+            img.alt = `${useLocaleStore.getState().t.editor.imageLoadFailed}: ${src}`;
+            img.style.opacity = '1';
+          });
+      }
+    });
+  }, [currentFile, filePath, html, vaultPath]);
+
+  // Callout fold toggle in preview mode
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleCalloutFold = (e: MouseEvent) => {
+      const title = (e.target as HTMLElement).closest('.callout-title');
+      if (!title) return;
+      const callout = title.closest('.callout');
+      if (!callout?.querySelector('.callout-fold')) return;
+      e.stopPropagation();
+      callout.classList.toggle('callout-folded');
+    };
+
+    container.addEventListener('click', handleCalloutFold);
+    return () => container.removeEventListener('click', handleCalloutFold);
+  }, [html]);
+
+  // Handle WikiLink, Tag, and MindFlow link clicks
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    
+    // Handle mindflow:// PDF links (Ctrl+Click to open in split view)
+    if (target.tagName === 'A') {
+      const href = target.getAttribute('href');
+      if (href && href.startsWith('mindflow://pdf')) {
+        e.preventDefault();
+        const parsed = parseMindFlowLink(href);
+        if (parsed && parsed.file) {
+          reportOperationError({
+            source: "ReadingView.handleClick",
+            action: "Open PDF preview link",
+            error: new Error("PDF preview is disabled in this AI-focused build."),
+            userMessage: "PDF preview is disabled in this AI-focused build.",
+            level: "warning",
+            context: { file: parsed.file, page: parsed.page, annotationId: parsed.id },
+          });
+        }
+        return;
+      }
+    }
+    
+    // Handle WikiLink clicks
+    if (target.classList.contains("wikilink")) {
+      e.preventDefault();
+      const linkName = target.getAttribute("data-wikilink");
+      if (linkName) {
+        // Find the file in fileTree
+        const findFile = (entries: typeof fileTree): string | null => {
+          for (const entry of entries) {
+            if (entry.is_dir && entry.children) {
+              const found = findFile(entry.children);
+              if (found) return found;
+            } else if (!entry.is_dir) {
+              const fileName = entry.name.replace(".md", "");
+              if (fileName.toLowerCase() === linkName.toLowerCase()) {
+                return entry.path;
+              }
+            }
+          }
+          return null;
+        };
+        
+        const filePath = findFile(fileTree);
+        if (filePath) {
+          openFile(filePath);
+        } else {
+          console.log(`Note not found: ${linkName}`);
+        }
+      }
+    }
+    
+    // Handle Tag clicks - dispatch event to show tag in sidebar
+    if (target.classList.contains("tag")) {
+      e.preventDefault();
+      const tagName = target.getAttribute("data-tag");
+      if (tagName) {
+        // Dispatch custom event for the right panel to handle
+        window.dispatchEvent(
+          new CustomEvent("tag-clicked", { detail: { tag: tagName } })
+        );
+      }
+    }
+  }, [fileTree, openFile]);
+
+  return (
+    <div
+      ref={containerRef}
+      className={`reading-view prose prose-neutral dark:prose-invert max-w-none ${className}`}
+      dangerouslySetInnerHTML={{ __html: html }}
+      onClick={handleClick}
+    />
+  );
+}
