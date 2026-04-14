@@ -16,16 +16,14 @@ function flattenKeys(value: Record<string, unknown>, prefix = ''): string[] {
 
 describe('i18n', () => {
   describe('SUPPORTED_LOCALES', () => {
-    it('should have 4 supported locales', () => {
-      expect(SUPPORTED_LOCALES.length).toBe(4);
+    it('should have 2 supported locales', () => {
+      expect(SUPPORTED_LOCALES.length).toBe(2);
     });
 
-    it('should include zh-CN, zh-TW, en, ja', () => {
+    it('should include zh-CN and en', () => {
       const codes = SUPPORTED_LOCALES.map(l => l.code);
       expect(codes).toContain('zh-CN');
-      expect(codes).toContain('zh-TW');
       expect(codes).toContain('en');
-      expect(codes).toContain('ja');
     });
 
     it('should have name and nativeName for each locale', () => {
@@ -48,7 +46,7 @@ describe('i18n', () => {
     it('keeps the same translation key tree across all locales', () => {
       const zhCNKeys = flattenKeys(getTranslations('zh-CN') as Record<string, unknown>).sort();
 
-      for (const locale of ['en', 'zh-TW', 'ja'] as const) {
+      for (const locale of ['en'] as const) {
         expect(flattenKeys(getTranslations(locale) as Record<string, unknown>).sort()).toEqual(zhCNKeys);
       }
     });
@@ -70,14 +68,14 @@ describe('i18n', () => {
       expect(detectSystemLocale()).toBe('zh-CN');
     });
 
-    it('should detect zh-TW for Chinese Traditional', () => {
+    it('should map Traditional Chinese to zh-CN when only Simplified Chinese is bundled', () => {
       vi.stubGlobal('navigator', { language: 'zh-TW' });
-      expect(detectSystemLocale()).toBe('zh-TW');
+      expect(detectSystemLocale()).toBe('zh-CN');
     });
 
-    it('should detect zh-TW for Hong Kong Chinese', () => {
+    it('should map Hong Kong Chinese to zh-CN when only Simplified Chinese is bundled', () => {
       vi.stubGlobal('navigator', { language: 'zh-HK' });
-      expect(detectSystemLocale()).toBe('zh-TW');
+      expect(detectSystemLocale()).toBe('zh-CN');
     });
 
     it('should detect en for English', () => {
@@ -85,9 +83,9 @@ describe('i18n', () => {
       expect(detectSystemLocale()).toBe('en');
     });
 
-    it('should detect ja for Japanese', () => {
+    it('should default Japanese to zh-CN when the locale pack is unavailable', () => {
       vi.stubGlobal('navigator', { language: 'ja-JP' });
-      expect(detectSystemLocale()).toBe('ja');
+      expect(detectSystemLocale()).toBe('zh-CN');
     });
 
     it('should default to zh-CN for unknown languages', () => {

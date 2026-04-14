@@ -1,15 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import en from '@/i18n/locales/en';
-import ja from '@/i18n/locales/ja';
 import zhCN from '@/i18n/locales/zh-CN';
-import zhTW from '@/i18n/locales/zh-TW';
 
 const locales = [
   ['en', en],
   ['zh-CN', zhCN],
-  ['zh-TW', zhTW],
-  ['ja', ja],
 ] as const;
 
 describe('auth locale consistency', () => {

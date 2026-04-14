@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { Locale, getTranslations, detectSystemLocale, Translations } from '@/i18n';
+import { Locale, getTranslations, detectSystemLocale, SUPPORTED_LOCALES, Translations } from '@/i18n';
 import { useCommandStore, getDefaultCommandsFromTranslations, type SlashCommand } from './useCommandStore';
 
 interface LocaleState {
@@ -31,7 +31,10 @@ function getInitialLocale(): Locale {
     if (saved) {
       const parsed = JSON.parse(saved);
       if (parsed.state?.locale) {
-        return parsed.state.locale as Locale;
+        const locale = parsed.state.locale as Locale;
+        if (SUPPORTED_LOCALES.some((item) => item.code === locale)) {
+          return locale;
+        }
       }
     }
   } catch {}
