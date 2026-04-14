@@ -421,7 +421,6 @@ export default {
     performanceDebugMessage: '性能调试已启用，刷新后生效',
     modeChat: '对话',
     modeAgent: 'Agent',
-    modeCodex: 'Codex',
     intentRecognized: '识别到意图',
     intentEmpty: '未识别到意图',
     intentTypeLabel: '类型',

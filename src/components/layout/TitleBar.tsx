@@ -169,7 +169,7 @@ export function TitleBar() {
     >
       {/* 左侧：应用图标和标题 */}
       <div className="flex items-center gap-2 px-3">
-        <img src="/mindflow.png" alt="Logo" className="w-4 h-4 pointer-events-none" />
+        <img src="/mindflow-rounded.png" alt="Logo" className="w-4 h-4 pointer-events-none" />
         <span className="text-[11px] text-muted-foreground font-medium tracking-[0.2em] uppercase pointer-events-none">
           MindFlow
         </span>

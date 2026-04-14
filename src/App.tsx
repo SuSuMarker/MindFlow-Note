@@ -31,8 +31,6 @@ import { useMacTopChromeEnabled } from "@/components/layout/MacTopChrome";
 import { MacLeftPaneTopBar } from "@/components/layout/MacLeftPaneTopBar";
 import { enableDebugLogger, disableDebugLogger } from "@/lib/debugLogger";
 import { AgentEvalPanel } from "@/tests/agent-eval/AgentEvalPanel";
-import { CodexVscodeHostPanel } from "@/components/debug/CodexVscodeHostPanel";
-import { CodexPanelHost } from "@/components/codex/CodexPanelHost";
 import { WelcomeScreen } from "@/components/onboarding/WelcomeScreen";
 import { OverviewDashboard } from "@/components/overview/OverviewDashboard";
 import { DevProfiler } from "@/perf/DevProfiler";
@@ -232,7 +230,6 @@ function App() {
   const [searchRequest, setSearchRequest] = useState<GlobalSearchRequest | null>(null);
   const [isLoadingVault, setIsLoadingVault] = useState(false);
   const [evalPanelOpen, setEvalPanelOpen] = useState(false);
-  const [codexPanelOpen, setCodexPanelOpen] = useState(false);
   const [welcomePreview, setWelcomePreview] = useState(false);
   const welcomeTapRef = useRef<{ count: number; timer: ReturnType<typeof setTimeout> | null }>({ count: 0, timer: null });
 
@@ -664,24 +661,10 @@ function App() {
         return;
       }
 
-      // Ctrl+Shift+C: Codex VS Code extension host (Dev only)
-      if (import.meta.env.DEV && isCtrl && e.shiftKey && e.key === "C") {
-        e.preventDefault();
-        setCodexPanelOpen(true);
-        return;
-      }
-
       // Esc: Close eval panel
       if (e.key === "Escape" && evalPanelOpen) {
         e.preventDefault();
         setEvalPanelOpen(false);
-        return;
-      }
-
-      // Esc: Close codex panel
-      if (e.key === "Escape" && codexPanelOpen) {
-        e.preventDefault();
-        setCodexPanelOpen(false);
         return;
       }
     };
@@ -690,7 +673,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [save, vaultPath, createNewFile, evalPanelOpen, codexPanelOpen]);
+  }, [save, vaultPath, createNewFile, evalPanelOpen]);
 
   // Open folder dialog
   const handleOpenVault = useCallback(async () => {
@@ -910,9 +893,6 @@ function App() {
           </DevProfiler>
         </div>
       </div>
-
-      <CodexPanelHost />
-
       {/* Command Palette */}
       <CommandPalette
         isOpen={paletteOpen}
@@ -949,21 +929,6 @@ function App() {
             </button>
           </div>
           <AgentEvalPanel />
-        </div>
-      )}
-
-      {/* Codex VS Code extension host panel (Dev only) */}
-      {import.meta.env.DEV && codexPanelOpen && (
-        <div className="fixed inset-0 z-[100] bg-background">
-          <div className="hidden">
-            <button
-              onClick={() => setCodexPanelOpen(false)}
-              className="px-4 py-2 bg-muted rounded hover:bg-muted/80"
-            >
-              ✕ {t.common.close} (Esc)
-            </button>
-          </div>
-          <CodexVscodeHostPanel onClose={() => setCodexPanelOpen(false)} />
         </div>
       )}
 

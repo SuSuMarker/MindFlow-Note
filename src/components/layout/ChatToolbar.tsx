@@ -1,7 +1,6 @@
 import { useLocaleStore } from "@/stores/useLocaleStore";
 import { useUIStore } from "@/stores/useUIStore";
 import {
-  Code2,
   Download,
   History,
   Plus,
@@ -23,7 +22,6 @@ interface ChatToolbarProps {
   onNewChat: () => void;
   agentTokens: number;
   chatTokens: number;
-  renderModeToggle: (className?: string) => React.ReactNode;
 }
 
 export function ChatToolbar({
@@ -38,23 +36,9 @@ export function ChatToolbar({
   onNewChat,
   agentTokens,
   chatTokens,
-  renderModeToggle,
 }: ChatToolbarProps) {
   const { t } = useLocaleStore();
   const chatMode = useUIStore((s) => s.chatMode);
-  const isCodexMode = chatMode === "codex";
-
-  if (isCodexMode) {
-    return (
-      <div className="ui-compact-row h-10 flex items-center justify-between px-4 border-b border-border/60 shrink-0 min-w-0">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Code2 size={14} />
-          <span className="ui-compact-text ui-compact-hide-md">{t.ai.modeCodex}</span>
-        </div>
-        {renderModeToggle()}
-      </div>
-    );
-  }
 
   return (
     <div className="ui-compact-row h-10 flex items-center justify-between px-4 border-b border-border/60 shrink-0 min-w-0">
@@ -146,20 +130,6 @@ export function ModeToggle({ className }: { className?: string }) {
         <span className="flex items-center gap-1 min-w-0">
           <Microscope size={12} />
           <span className="ai-mode-label ui-compact-text">{t.deepResearch.modeLabel}</span>
-        </span>
-      </button>
-      <button
-        onClick={() => setChatMode("codex")}
-        title="Codex"
-        className={`shrink-0 px-3 py-1 text-xs font-medium rounded-md transition-all duration-200 whitespace-nowrap ${
-          chatMode === "codex"
-            ? "bg-background text-foreground shadow-sm"
-            : "text-muted-foreground hover:text-foreground"
-        }`}
-      >
-        <span className="flex items-center gap-1 min-w-0">
-          <Code2 size={12} />
-          <span className="ai-mode-label ui-compact-text">{t.ai.modeCodex}</span>
         </span>
       </button>
     </div>

@@ -270,7 +270,7 @@ where
     }
 
     Err(format!(
-        "Bundled Codex runtime is incompatible. MindFlow needs Node {} or newer for Codex networking.",
+        "Bundled Node runtime is incompatible. MindFlow needs Node {} or newer for network features.",
         minimum_env_proxy_node_version()
     ))
 }

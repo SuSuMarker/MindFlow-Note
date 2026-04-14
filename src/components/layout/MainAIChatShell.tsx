@@ -53,7 +53,6 @@ import type { ReferencedFile } from "@/hooks/useChatSend";
 import { useShallow } from "zustand/react/shallow";
 import { AISettingsModal } from "../ai/AISettingsModal";
 import { DeepResearchCard } from "../deep-research";
-import { CodexPanelSlot } from "@/components/codex/CodexPanelSlot";
 import { join as joinPath } from "@tauri-apps/api/path";
 import { 
   useDeepResearchStore, 
@@ -111,7 +110,6 @@ function parseChatAssistantParts(content: string): ChatAssistantPart[] {
 export function MainAIChatShell() {
   const { t } = useLocaleStore();
   const { chatMode, setSkillManagerOpen } = useUIStore();
-  const isCodexMode = chatMode === "codex";
   const [input, setInput] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -152,12 +150,6 @@ export function MainAIChatShell() {
     skillsLoading,
     handleSelectSkill: _handleSelectSkill,
   } = useSkillSearch();
-
-  useEffect(() => {
-    if (isCodexMode && showHistory) {
-      setShowHistory(false);
-    }
-  }, [isCodexMode, showHistory]);
 
   // ========== Rust Agent ==========
   const {
@@ -277,13 +269,12 @@ export function MainAIChatShell() {
   );
 
   const handleNewChat = useCallback(() => {
-    if (chatMode === "codex") return;
     setIsExportSelectionMode(false);
     setSelectedExportIds([]);
     setSelectedSkills([]);
     _sessionNewChat();
     setShowHistory(false);
-  }, [chatMode, _sessionNewChat, setSelectedSkills]);
+  }, [_sessionNewChat, setSelectedSkills]);
 
   const { vaultPath, currentFile, currentContent, fileTree, recentFiles, openFile, refreshFileTree } = useFileStore(
     useShallow((state) => ({
@@ -303,13 +294,11 @@ export function MainAIChatShell() {
 
   // 判断是否有对话历史（用于控制动画状态）
   // Chat 模式下，流式进行中也算已开始（确保流式消息能正确显示）
-  const hasStarted = isCodexMode
-    ? true
-    : chatMode === "research"
-      ? _researchSession !== null
-      : chatMode === "agent"
-        ? agentMessages.length > 0 || agentStatus === "error"
-        : chatMessages.length > 0 || chatStreaming || !!chatError;
+  const hasStarted = chatMode === "research"
+    ? _researchSession !== null
+    : chatMode === "agent"
+      ? agentMessages.length > 0 || agentStatus === "error"
+      : chatMessages.length > 0 || chatStreaming || !!chatError;
 
   useEffect(() => {
     if (!import.meta.env.DEV || typeof performance === "undefined") {
@@ -739,9 +728,6 @@ export function MainAIChatShell() {
     if (isExportSelectionMode) {
       return;
     }
-    if (chatMode === "codex") {
-      return;
-    }
     const fallbackMessage = autoSendMessageRef.current?.trim() ?? "";
     const overrideMessage = overrideInput?.trim() ?? "";
     const effectiveInput = overrideMessage || input.trim() || fallbackMessage;
@@ -842,9 +828,6 @@ export function MainAIChatShell() {
       localStorage.getItem("lumina_debug_auto_send") === "1" ||
       import.meta.env.VITE_MINDFLOW_DEBUG_AUTO_SEND === "1";
     if (!autoSendEnabled || autoSendRef.current) {
-      return;
-    }
-    if (chatMode === "codex") {
       return;
     }
     autoSendRef.current = true;
@@ -1029,7 +1012,6 @@ export function MainAIChatShell() {
         onNewChat={handleNewChat}
         agentTokens={rustTotalTokens}
         chatTokens={chatTotalTokens}
-        renderModeToggle={(className) => <ModeToggle className={className} />}
       />
 
       <div className="flex-1 relative overflow-hidden">
@@ -1049,14 +1031,7 @@ export function MainAIChatShell() {
 
         {/* 主要内容区域 - 始终居中 */}
         <main className="h-full w-full flex flex-col overflow-hidden min-h-0 min-w-0">
-          {isCodexMode ? (
-            <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-              <div className="flex-1 flex overflow-hidden min-h-0">
-                <CodexPanelSlot slot="main" renderMode="iframe" className="flex-1 h-full w-full" />
-              </div>
-            </div>
-          ) : (
-            <>
+          <>
 
           <WelcomeGreeting hasStarted={hasStarted} />
 
@@ -1305,8 +1280,6 @@ export function MainAIChatShell() {
               </motion.div>
           </div>
 
-          {/* 输入框容器 */}
-          {!isCodexMode && (
           <div className={`w-full shrink-0 ${hasStarted ? "pb-4" : ""}`}>
             {!isExportSelectionMode && chatMode === "agent" && (agentQueueCount > 0 || rustActiveTaskPreview || (llmRetryState && agentStatus === "running")) && (
               <motion.div
@@ -1529,7 +1502,7 @@ export function MainAIChatShell() {
                 {/* 底部工具栏 */}
                 <div className="ai-toolbar-row px-4 pb-3 pt-1 flex items-center justify-between">
                   <div className="ai-toolbar-left flex items-center gap-2 min-w-0 overflow-hidden">
-                    {/* Chat/Agent/Research/Codex 切换滑块 */}
+                    {/* Chat/Agent/Research 切换滑块 */}
                     {<ModeToggle />}
 
                     {/* 网络搜索按钮（独立于模式切换） */}
@@ -1677,13 +1650,9 @@ export function MainAIChatShell() {
               </motion.div>
             </motion.div>
           </div>
-          )}
 
-          {!isCodexMode && (
-            <WelcomeSuggestions hasStarted={hasStarted} onSetInput={setInput} currentFile={currentFile} recentFiles={recentFiles} fileTree={fileTree} />
-          )}
-            </>
-          )}
+          <WelcomeSuggestions hasStarted={hasStarted} onSetInput={setInput} currentFile={currentFile} recentFiles={recentFiles} fileTree={fileTree} />
+          </>
         </main>
 
         {/* 调试按钮（开发模式） */}

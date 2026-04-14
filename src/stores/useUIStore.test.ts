@@ -106,7 +106,7 @@ describe('useUIStore', () => {
     const { useUIStore } = await loadStore();
 
     expect(useUIStore.getState().themeId).toBe('legacy-theme');
-    expect(useUIStore.getState().chatMode).toBe('codex');
+    expect(useUIStore.getState().chatMode).toBe('agent');
     expect(useUIStore.getState().isSettingsOpen).toBe(false);
     expect(useUIStore.getState().floatingPanelOpen).toBe(false);
     expect(localStorage.getItem('neurone-ui')).toBeNull();

@@ -6,8 +6,6 @@
 
 mod agent;
 mod cloud_relay;
-mod codex_extension;
-mod codex_vscode_host;
 mod commands;
 mod diagnostics;
 mod doc_tools;
@@ -136,19 +134,6 @@ fn main() {
             mcp::mcp_reload,
             mcp::mcp_test_tool,
             mcp::mcp_shutdown,
-            // VS Code extension host (Codex POC)
-            codex_vscode_host::codex_vscode_host_start,
-            codex_vscode_host::codex_vscode_host_stop,
-            codex_vscode_host::codex_webview_exists,
-            codex_vscode_host::create_codex_webview,
-            codex_vscode_host::update_codex_webview_bounds,
-            codex_vscode_host::set_codex_webview_visible,
-            codex_vscode_host::navigate_codex_webview,
-            codex_vscode_host::close_codex_webview,
-            // Codex extension management (Marketplace install)
-            codex_extension::codex_extension_get_status,
-            codex_extension::codex_extension_install_latest,
-            codex_extension::codex_extension_install_vsix,
             // Doc tools pack commands
             doc_tools::doc_tools_get_status,
             doc_tools::doc_tools_install_latest,
@@ -182,7 +167,6 @@ fn main() {
         ])
         .manage(agent::AgentState::new())
         .manage(agent::DeepResearchStateManager::new())
-        .manage(codex_vscode_host::CodexVscodeHostState::default())
         .manage(mobile_gateway::MobileGatewayState::new())
         .manage(cloud_relay::CloudRelayState::new())
         .manage(update_manager::UpdateManagerState::default())

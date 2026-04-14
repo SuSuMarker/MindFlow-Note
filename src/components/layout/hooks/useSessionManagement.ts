@@ -127,7 +127,6 @@ export function useSessionManagement() {
   );
 
   const handleNewChat = useCallback(() => {
-    if (chatMode === "codex") return;
     if (chatMode === "research") {
       resetResearch();
     } else if (chatMode === "agent") {

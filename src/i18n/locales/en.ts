@@ -421,7 +421,6 @@ export default {
     performanceDebugMessage: 'Performance debug enabled. Reload to take effect.',
     modeChat: 'Chat',
     modeAgent: 'Agent',
-    modeCodex: 'Codex',
     intentRecognized: 'Intent recognized',
     intentEmpty: 'No intent detected',
     intentTypeLabel: 'Type',

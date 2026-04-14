@@ -100,7 +100,7 @@ export function WelcomeScreen({ onOpenVault }: WelcomeScreenProps) {
                 }}
               />
               <img
-                src="/mindflow.png"
+                src="/mindflow-rounded.png"
                 alt="MindFlow"
                 className="relative w-20 h-20"
               />
