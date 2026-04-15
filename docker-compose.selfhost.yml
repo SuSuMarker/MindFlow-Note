@@ -1,17 +1,17 @@
 version: "3.9"
 
 services:
-  lumina-server:
+  mindflow-server:
     build:
       context: .
       dockerfile: server/Dockerfile
     environment:
-      LUMINA_BIND: 0.0.0.0:8787
-      LUMINA_DB_URL: sqlite:///data/lumina.db
-      LUMINA_DATA_DIR: /data
-      LUMINA_JWT_SECRET: ${LUMINA_JWT_SECRET:?set in .env}
+      MINDFLOW_BIND: 0.0.0.0:8787
+      MINDFLOW_DB_URL: sqlite:///data/mindflow.db
+      MINDFLOW_DATA_DIR: /data
+      MINDFLOW_JWT_SECRET: ${MINDFLOW_JWT_SECRET:?set in .env}
     volumes:
-      - lumina-data:/data
+      - mindflow-data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8787/health"]
@@ -22,13 +22,13 @@ services:
   caddy:
     image: caddy:2
     depends_on:
-      lumina-server:
+      mindflow-server:
         condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
     environment:
-      LUMINA_DOMAIN: ${LUMINA_DOMAIN:?set in .env}
+      MINDFLOW_DOMAIN: ${MINDFLOW_DOMAIN:?set in .env}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -36,6 +36,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  lumina-data:
+  mindflow-data:
   caddy_data:
   caddy_config:

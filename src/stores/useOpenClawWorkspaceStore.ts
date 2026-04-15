@@ -403,7 +403,7 @@ export const useOpenClawWorkspaceStore = create<OpenClawWorkspaceState>()(
               status: "warning",
               files: Array.from(new Set(conflictingPaths)),
               lastDetectedAt: new Date().toISOString(),
-              message: `OpenClaw updated ${conflictingPaths.length} file(s) that also have unsaved edits in Lumina.`,
+              message: `OpenClaw updated ${conflictingPaths.length} file(s) that also have unsaved edits in MindFlow.`,
             },
           },
         }));

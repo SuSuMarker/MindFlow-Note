@@ -4,7 +4,7 @@ import path from "node:path";
 
 const DEFAULT_MANIFEST = "tests/typesetting/samples/manifest.json";
 const DEFAULT_BASELINE_DIR = "tests/typesetting/openoffice-baselines";
-const DEFAULT_CANDIDATE_DIR = "tests/typesetting/lumina-baselines";
+const DEFAULT_CANDIDATE_DIR = "tests/typesetting/mindflow-baselines";
 const DEFAULT_OUT_DIR = "tests/typesetting/compare-reports";
 
 const parseArgs = (argv) => {

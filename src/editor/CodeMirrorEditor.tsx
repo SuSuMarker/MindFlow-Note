@@ -384,7 +384,7 @@ const createEditorTheme = (fontSize: number) =>
     ".cm-codeblock-fence": {
       color: "hsl(var(--muted-foreground) / 0.6)",
     },
-    ".cm-lumina-codeblock-open .cm-codeblock-fence, .cm-lumina-codeblock-close .cm-codeblock-fence":
+    ".cm-mindflow-codeblock-open .cm-codeblock-fence, .cm-mindflow-codeblock-close .cm-codeblock-fence":
       {
         color: "hsl(var(--muted-foreground) / 0.72)",
       },
@@ -4579,7 +4579,7 @@ export const CodeMirrorEditor = forwardRef<
 
   // 监听自定义拖拽事件（从文件树拖拽创建双链）
   useEffect(() => {
-    const handleLuminaDrop = (e: Event) => {
+    const handleMindFlowDrop = (e: Event) => {
       const { wikiLink, x, y } = (e as CustomEvent).detail;
       const v = viewRef.current;
       const container = containerRef.current;
@@ -4597,8 +4597,8 @@ export const CodeMirrorEditor = forwardRef<
       v.focus();
     };
 
-    window.addEventListener("mindflow-drop", handleLuminaDrop);
-    return () => window.removeEventListener("mindflow-drop", handleLuminaDrop);
+    window.addEventListener("mindflow-drop", handleMindFlowDrop);
+    return () => window.removeEventListener("mindflow-drop", handleMindFlowDrop);
   }, []);
 
   return (

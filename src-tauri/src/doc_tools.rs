@@ -41,7 +41,7 @@ const DOC_TOOLS_ENV_DIR: &str = "MINDFLOW_DOC_TOOLS_DIR";
 const DOC_TOOLS_ENV_URL: &str = "MINDFLOW_DOC_TOOLS_URL";
 const DOC_TOOLS_ENV_MANIFEST_URL: &str = "MINDFLOW_DOC_TOOLS_MANIFEST_URL";
 const DEFAULT_DOC_TOOLS_MANIFEST_URL: &str =
-    "https://github.com/blueberrycongee/Lumina-Note/releases/latest/download/doc-tools-manifest.json";
+    "https://github.com/SuSuMarker/MindFlow-Note/releases/latest/download/doc-tools-manifest.json";
 
 #[derive(Debug, Deserialize)]
 struct DocToolsManifest {
@@ -120,7 +120,7 @@ fn doc_tools_archive_url(version: &str, platform: NodePlatform, arch: NodeArch) 
     }
     let name = doc_tools_archive_name(version, platform, arch)?;
     Some(format!(
-        "https://github.com/blueberrycongee/Lumina-Note/releases/download/doc-tools-v{version}/{name}"
+        "https://github.com/SuSuMarker/MindFlow-Note/releases/download/doc-tools-v{version}/{name}"
     ))
 }
 

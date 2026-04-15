@@ -573,7 +573,7 @@ export function MainAIChatShell() {
   // 监听文件拖拽事件，支持从文件树拖拽文件引用到 AI 对话框
   const chatContainerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const handleLuminaDrop = (e: Event) => {
+    const handleMindFlowDrop = (e: Event) => {
       const { filePath, fileName, x, y } = (e as CustomEvent).detail;
       if (!filePath || !fileName) return;
       
@@ -594,8 +594,8 @@ export function MainAIChatShell() {
       textareaRef.current?.focus();
     };
     
-    window.addEventListener('mindflow-drop', handleLuminaDrop);
-    return () => window.removeEventListener('mindflow-drop', handleLuminaDrop);
+    window.addEventListener('mindflow-drop', handleMindFlowDrop);
+    return () => window.removeEventListener('mindflow-drop', handleMindFlowDrop);
   }, []);
 
   useEffect(() => {
@@ -825,7 +825,7 @@ export function MainAIChatShell() {
       return;
     }
     const autoSendEnabled =
-      localStorage.getItem("lumina_debug_auto_send") === "1" ||
+      localStorage.getItem("mindflow_debug_auto_send") === "1" ||
       import.meta.env.VITE_MINDFLOW_DEBUG_AUTO_SEND === "1";
     if (!autoSendEnabled || autoSendRef.current) {
       return;

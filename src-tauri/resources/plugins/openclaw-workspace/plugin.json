@@ -2,7 +2,7 @@
   "id": "openclaw-workspace",
   "name": "OpenClaw Workspace",
   "version": "0.1.0",
-  "description": "Surface OpenClaw memory files and artifacts directly inside Lumina.",
+  "description": "Surface OpenClaw memory files and artifacts directly inside MindFlow.",
   "entry": "index.js",
   "permissions": [
     "commands:register",

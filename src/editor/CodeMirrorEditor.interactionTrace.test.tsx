@@ -23,7 +23,7 @@ describe('CodeMirror editor interaction trace API', () => {
     useUIStore.setState({ editorInteractionTraceEnabled: false });
   });
 
-  it('exposes a lumina trace alias that can capture custom interaction markers', () => {
+  it('exposes a mindflow trace alias that can capture custom interaction markers', () => {
     render(<CodeMirrorEditor content={'Line 1\nLine 2'} onChange={vi.fn()} viewMode="live" />);
 
     expect(window.__mindflowEditorTrace).toBeTruthy();

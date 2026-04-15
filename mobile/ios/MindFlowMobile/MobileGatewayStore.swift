@@ -60,8 +60,8 @@ final class MobileGatewayStore: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
-        pairingPayload = defaults.string(forKey: "lumina_pairing_payload") ?? ""
-        isPaired = defaults.bool(forKey: "lumina_paired")
+        pairingPayload = defaults.string(forKey: "mindflow_pairing_payload") ?? ""
+        isPaired = defaults.bool(forKey: "mindflow_paired")
         sessions = []
         if isPaired, !pairingPayload.isEmpty {
             connect()
@@ -71,15 +71,15 @@ final class MobileGatewayStore: ObservableObject {
     func applyPairingPayload(_ payload: String) {
         pairingPayload = payload
         let defaults = UserDefaults.standard
-        defaults.set(payload, forKey: "lumina_pairing_payload")
+        defaults.set(payload, forKey: "mindflow_pairing_payload")
         guard parsePairingPayload(payload) != nil else {
             errorMessage = "Invalid payload"
             connectionStatus = "Invalid payload"
-            defaults.set(false, forKey: "lumina_paired")
+            defaults.set(false, forKey: "mindflow_paired")
             isPaired = false
             return
         }
-        defaults.set(true, forKey: "lumina_paired")
+        defaults.set(true, forKey: "mindflow_paired")
         isPaired = true
         connect()
     }
@@ -87,7 +87,7 @@ final class MobileGatewayStore: ObservableObject {
     func connect() {
         guard let payload = parsePairingPayload(pairingPayload) else {
             connectionStatus = "Invalid payload"
-            UserDefaults.standard.set(false, forKey: "lumina_paired")
+            UserDefaults.standard.set(false, forKey: "mindflow_paired")
             isPaired = false
             return
         }
@@ -111,7 +111,7 @@ final class MobileGatewayStore: ObservableObject {
 
         guard let address = payload.addresses.first else {
             connectionStatus = "No address"
-            UserDefaults.standard.set(false, forKey: "lumina_paired")
+            UserDefaults.standard.set(false, forKey: "mindflow_paired")
             isPaired = false
             return
         }
@@ -139,8 +139,8 @@ final class MobileGatewayStore: ObservableObject {
     func resetPairing() {
         disconnect()
         let defaults = UserDefaults.standard
-        defaults.set("", forKey: "lumina_pairing_payload")
-        defaults.set(false, forKey: "lumina_paired")
+        defaults.set("", forKey: "mindflow_pairing_payload")
+        defaults.set(false, forKey: "mindflow_paired")
         pairingPayload = ""
         isPaired = false
         connectionStatus = "Disconnected"

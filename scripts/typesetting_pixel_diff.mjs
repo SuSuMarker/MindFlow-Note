@@ -169,7 +169,7 @@ const main = () => {
   if (!fs.existsSync(absBase)) throw new Error(`Base PDF not found: ${absBase}`);
   if (!fs.existsSync(absCandidate)) throw new Error(`Candidate PDF not found: ${absCandidate}`);
 
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "lumina-pixel-diff-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mindflow-pixel-diff-"));
   const baseDir = path.join(tempRoot, "base");
   const candDir = path.join(tempRoot, "candidate");
   fs.mkdirSync(baseDir, { recursive: true });

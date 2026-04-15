@@ -97,7 +97,7 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(({
     };
 
     // 直接拖拽到输入框区域
-    const handleLuminaDrop = (e: Event) => {
+    const handleMindFlowDrop = (e: Event) => {
       const { filePath, fileName, x, y } = (e as CustomEvent).detail;
       if (!filePath || !fileName) return;
 
@@ -117,10 +117,10 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(({
       addFileRef(filePath, fileName);
     };
 
-    window.addEventListener('mindflow-drop', handleLuminaDrop);
+    window.addEventListener('mindflow-drop', handleMindFlowDrop);
     window.addEventListener('chat-input-file-drop', handlePanelFileDrop);
     return () => {
-      window.removeEventListener('mindflow-drop', handleLuminaDrop);
+      window.removeEventListener('mindflow-drop', handleMindFlowDrop);
       window.removeEventListener('chat-input-file-drop', handlePanelFileDrop);
     };
   }, []);

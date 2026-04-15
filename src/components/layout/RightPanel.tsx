@@ -479,7 +479,7 @@ export function RightPanel() {
 
   // 监听文件拖拽放置，如果在面板区域内，转发给 ChatInput
   useEffect(() => {
-    const handleLuminaDrop = (e: Event) => {
+    const handleMindFlowDrop = (e: Event) => {
       const { filePath, fileName, x, y } = (e as CustomEvent).detail;
       if (!filePath || !fileName || !panelRef.current) return;
       
@@ -495,8 +495,8 @@ export function RightPanel() {
       }
     };
     
-    window.addEventListener('mindflow-drop', handleLuminaDrop);
-    return () => window.removeEventListener('mindflow-drop', handleLuminaDrop);
+    window.addEventListener('mindflow-drop', handleMindFlowDrop);
+    return () => window.removeEventListener('mindflow-drop', handleMindFlowDrop);
   }, [rightPanelTab, aiPanelMode, isMainAIActive]);
 
   // 使用统一的会话管理 hook

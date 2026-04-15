@@ -178,7 +178,7 @@ fn prioritized_node_candidates_from_env(
     resource_dir: Option<&Path>,
     app_data_dir: Option<&Path>,
     platform: NodePlatform,
-    lumina_node_path: Option<&str>,
+    mindflow_node_path: Option<&str>,
     node_env: Option<&str>,
     path_env: Option<&OsStr>,
 ) -> Vec<PathBuf> {
@@ -191,7 +191,7 @@ fn prioritized_node_candidates_from_env(
         }
     };
 
-    if let Some(env_path) = lumina_node_path {
+    if let Some(env_path) = mindflow_node_path {
         push_candidate(PathBuf::from(env_path));
     }
 

@@ -189,6 +189,6 @@ Optional / heavy tools:
 - Poppler: `sudo apt-get install poppler-utils` (for pdftoppm to convert PDF to images)
 - docx: `npm install -g docx` (for creating new documents with docx-js)
 
-Lumina Doc Tools Pack (recommended):
-- Lumina provides an optional "Doc Tools Pack" that bundles Python + common document tools.
+MindFlow Doc Tools Pack (recommended):
+- MindFlow provides an optional "Doc Tools Pack" that bundles Python + common document tools.
 - If installed, use it instead of system packages.

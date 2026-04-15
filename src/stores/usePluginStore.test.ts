@@ -49,8 +49,8 @@ const builtinOpenClawPlugin: PluginInfo = {
   permissions: ["commands:register", "ui:decorate", "workspace:open", "workspace:tab"],
   enabled_by_default: true,
   source: "builtin",
-  root_path: "/Applications/Lumina/resources/plugins/openclaw-workspace",
-  entry_path: "/Applications/Lumina/resources/plugins/openclaw-workspace/index.js",
+  root_path: "/Applications/MindFlow/resources/plugins/openclaw-workspace",
+  entry_path: "/Applications/MindFlow/resources/plugins/openclaw-workspace/index.js",
   validation_error: null,
   theme: null,
 };

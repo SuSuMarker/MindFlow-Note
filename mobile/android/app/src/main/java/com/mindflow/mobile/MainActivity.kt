@@ -1369,7 +1369,7 @@ private fun formatTimeLabel(timestamp: Long): String {
 }
 
 private object PairingPrefs {
-    private const val PREFS = "lumina_mobile"
+    private const val PREFS = "mindflow_mobile"
     private const val KEY_PAIRED = "paired"
     private const val KEY_PAYLOAD = "pairing_payload"
 

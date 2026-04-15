@@ -21,7 +21,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { useOpenClawWorkspaceStore } from "./useOpenClawWorkspaceStore";
 
-const hostWorkspacePath = "/tmp/lumina";
+const hostWorkspacePath = "/tmp/mindflow";
 const mountedWorkspacePath = "/tmp/openclaw";
 
 describe("useOpenClawWorkspaceStore", () => {
@@ -306,7 +306,7 @@ describe("useOpenClawWorkspaceStore", () => {
     expect(updated?.gateway.endpoint).toBe("ws://127.0.0.1:8042");
   });
 
-  it("records a warning when external OpenClaw changes hit dirty Lumina files", async () => {
+  it("records a warning when external OpenClaw changes hit dirty MindFlow files", async () => {
     inspectMock.mockResolvedValue({
       workspacePath: mountedWorkspacePath,
       status: "detected",

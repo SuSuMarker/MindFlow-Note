@@ -3,7 +3,7 @@
   "name": "Executive Monochrome",
   "version": "0.1.0",
   "description": "Minimal business monochrome theme focused on readability and consistent information density.",
-  "author": "Lumina",
+  "author": "MindFlow",
   "entry": "index.js",
   "min_app_version": "0.1.0",
   "api_version": "1",

@@ -1,4 +1,4 @@
-{$LUMINA_DOMAIN} {
+{$MINDFLOW_DOMAIN} {
   encode gzip zstd
-  reverse_proxy lumina-server:8787
+  reverse_proxy mindflow-server:8787
 }
